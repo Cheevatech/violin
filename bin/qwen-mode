@@ -1,0 +1,61 @@
+#!/bin/sh
+set -eu
+
+mode=${1:-}
+shift || true
+
+case "$mode" in
+  plan|review|verify)
+    sandbox=read-only
+    mode_policy="You are in $mode mode. Use read-only operations only. Do not create, edit, delete, move, or format files. Report findings, ordered actions, verification commands, and explicitly state whether files changed."
+    ;;
+  implement)
+    sandbox=workspace-write
+    mode_policy="You are in implement mode. Make only the requested in-scope changes. Inspect git diff after editing and run the smallest relevant validation. Do not claim success without evidence."
+    ;;
+  *)
+    printf '%s\n' 'Usage: qwen-mode {plan|implement|review|verify} [-C DIR] [--json] [--] PROMPT' >&2
+    exit 2
+    ;;
+esac
+
+workspace=
+json=
+prompt=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -C|--cd)
+      [ "$#" -ge 2 ] || { printf '%s\n' "Missing directory after $1" >&2; exit 2; }
+      workspace=$2
+      shift 2
+      ;;
+    --json)
+      json=1
+      shift
+      ;;
+    --)
+      shift
+      prompt=$*
+      break
+      ;;
+    *)
+      if [ -n "$prompt" ]; then prompt="$prompt $1"; else prompt=$1; fi
+      shift
+      ;;
+  esac
+done
+
+[ -n "$prompt" ] || { printf '%s\n' 'A prompt is required.' >&2; exit 2; }
+
+full_prompt="$mode_policy
+
+Platform guidance: this is macOS. Prefer portable commands such as sed, awk, od, xxd, and grep. Avoid GNU-only forms such as cat -A, sed -r, and readlink -f. Check every command exit status and output before continuing.
+
+User task:
+$prompt"
+
+set -- exec --skip-git-repo-check -s "$sandbox"
+[ -n "$workspace" ] && set -- "$@" -C "$workspace"
+[ -n "$json" ] && set -- "$@" --json
+set -- "$@" "$full_prompt"
+exec /Users/film/bin/violin-codex-qwen "$@"

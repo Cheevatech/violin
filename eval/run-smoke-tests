@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+tmp=$(mktemp -d /tmp/qwen-global-eval.XXXXXX)
+trap 'rm -rf "$tmp"' EXIT
+
+repo=$tmp/repo
+mkdir -p "$repo"
+git -C "$repo" init -q
+printf '%s\n' 'hello' > "$repo/message.txt"
+git -C "$repo" add message.txt
+git -C "$repo" -c user.name=eval -c user.email=eval@example.invalid commit -qm initial
+
+printf '%s\n' '[plan]'
+if ! "$root/bin/qwen-mode" plan -C "$repo" --json -- 'Inspect this repository and propose a plan to change message.txt to contain "updated". Do not modify files.' > "$tmp/plan.jsonl" 2> "$tmp/plan.err"; then
+  cat "$tmp/plan.err" "$tmp/plan.jsonl" >&2
+  exit 1
+fi
+if grep -Eq 'turn.failed|no deployment|Service Unavailable' "$tmp/plan.jsonl"; then
+  cat "$tmp/plan.err" "$tmp/plan.jsonl" >&2
+  exit 1
+fi
+grep -q 'turn.completed' "$tmp/plan.jsonl"
+test -z "$(git -C "$repo" status --short)"
+
+printf '%s\n' '[implement]'
+if ! "$root/bin/qwen-mode" implement -C "$repo" --json -- 'Change only message.txt so its exact content is updated followed by a newline. Verify the file.' > "$tmp/implement.jsonl" 2> "$tmp/implement.err"; then
+  cat "$tmp/implement.err" "$tmp/implement.jsonl" >&2
+  exit 1
+fi
+if grep -Eq 'turn.failed|no deployment|Service Unavailable' "$tmp/implement.jsonl"; then
+  cat "$tmp/implement.err" "$tmp/implement.jsonl" >&2
+  exit 1
+fi
+grep -q 'turn.completed' "$tmp/implement.jsonl"
+grep -qx 'updated' "$repo/message.txt"
+
+printf '%s\n' '[verify gate]'
+"$root/bin/qwen-verify-gate" --repo "$repo" -- sh -c 'test "$(sed -n "1p" message.txt)" = updated'
+
+printf '%s\n' 'Qwen global smoke tests passed.'
