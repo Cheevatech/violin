@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+project=${1:-/Users/film/Documents/llmux}
+[ -d "$project/.git" ] || {
+  printf '%s\n' "tool smoke: not a git project: $project" >&2
+  exit 2
+}
+
+printf '%s\n' '[serena bridge]'
+bridge_output=$(/Users/film/bin/serena-bridge symbols "$project" server/server.go)
+printf '%s\n' "$bridge_output" | grep -Fq '"ok": true'
+printf '%s\n' "$bridge_output" | grep -Fq '"tool": "get_symbols_overview"'
+
+printf '%s\n' '[qwen preflight]'
+qwen_output=$(/Users/film/.codex/skills/loop-engineer/scripts/run-with-timeout.sh 60 \
+  /Users/film/bin/violin-codex-qwen smoke 2>&1)
+printf '%s\n' "$qwen_output" | grep -Fq 'QWEN_SMOKE_OK'
+printf '%s\n' "$qwen_output" | grep -Eq 'qwen3\.8-27b|Qwen 3\.8 27B'
+printf '%s\n' "$qwen_output" | grep -Fq 'violin_lan'
+if printf '%s\n' "$qwen_output" | grep -Fq 'unsupported call'; then
+  exit 1
+fi
+
+printf '%s\n' 'Qwen tool smoke tests passed.'

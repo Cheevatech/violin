@@ -26,4 +26,9 @@ Plan, review, and verify use a read-only sandbox. Implement uses
 ```bash
 make test
 ./eval/run-smoke-tests
+./eval/run-tool-smoke-tests
 ```
+
+Qwen uses `/Users/film/bin/serena-bridge` for semantic navigation because the
+self-hosted Responses route currently cannot dispatch native Serena MCP calls.
+Native Serena remains enabled for the regular GPT/Codex profile.
