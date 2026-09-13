@@ -88,6 +88,26 @@ time.sleep(30)
             result = subprocess.run([str(checker), str(cache)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0)
 
+    def test_incomplete_cache_entry_uses_effective_metadata(self):
+        checker = Path(__file__).resolve().parents[1] / "bin/violin-qwen-metadata"
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "models.json"
+            cache.write_text(json.dumps({"fetched_at": "2099-01-01T00:00:00Z", "models": [{
+                "slug": "qwen3.8-27b", "context_window": 200000,
+                "supported_reasoning_levels": [{"effort": "medium"}],
+                "supported_in_api": True}]}))
+            effective = {"slug": "qwen3.8-27b", "shell_type": "responses",
+                         "context_window": 200000,
+                         "supported_reasoning_levels": [{"effort": "medium"}],
+                         "supported_in_api": True}
+            fake_codex = Path(directory) / "codex"
+            fake_codex.write_text("#!/usr/bin/env python3\nimport json\nprint(json.dumps(%r))\n" % {"models": [effective]})
+            fake_codex.chmod(0o700)
+            result = subprocess.run([str(checker), str(cache)], capture_output=True, text=True,
+                                    env=dict(os.environ, VIOLIN_CODEX_BIN=str(fake_codex)))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("codex_debug_models", result.stdout)
+
     def test_missing_qwen_metadata_does_not_launch_backend(self):
         checker = Path(__file__).resolve().parents[1] / "bin/violin-qwen-metadata"
         with tempfile.TemporaryDirectory() as directory:

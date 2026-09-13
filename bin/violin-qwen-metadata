@@ -63,10 +63,11 @@ def check(cache_path=None, now=None):
         cache_error = None
     entry = next((m for m in models if isinstance(m, dict) and m.get("slug") == MODEL), None)
     source = "models_cache"
-    if entry is None:
+    if entry is None or not provider_ok(entry):
         cache_error = cache_error or "model entry is missing"
-        entry, effective_error = effective_entry()
-        if entry is not None:
+        effective_entry_value, effective_error = effective_entry()
+        if effective_entry_value is not None:
+            entry = effective_entry_value
             source = "codex_debug_models" if entry.get("shell_type") else "launcher_config"
         else:
             errors = [cache_error, effective_error]
