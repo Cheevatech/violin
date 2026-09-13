@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Install the external agent MCP and concise global routing guidance."""
+import json
+from pathlib import Path
+import shutil
+import time
+import tomllib
+
+ROOT = Path(__file__).resolve().parents[1]
+START = "# BEGIN VIOLIN EXTERNAL AGENTS"
+END = "# END VIOLIN EXTERNAL AGENTS"
+
+
+def replace_block(text, block):
+    if START in text:
+        before, rest = text.split(START, 1)
+        if END not in rest:
+            raise ValueError("Incomplete managed block; refusing to overwrite")
+        _, after = rest.split(END, 1)
+        return before + block + after
+    return text.rstrip() + "\n\n" + block + "\n"
+
+
+def main():
+    home = Path.home()
+    config = home / ".codex/config.toml"
+    guidance = home / ".codex/AGENTS.md"
+    original = config.read_text() if config.exists() else ""
+    parsed = tomllib.loads(original)
+    if "violin_agents" in parsed.get("mcp_servers", {}) and START not in original:
+        raise ValueError("An unmanaged violin_agents server already exists")
+    block = f'''{START}
+[mcp_servers.violin_agents]
+command = {json.dumps(str(ROOT / 'bin/violin-agent-server'))}
+tool_timeout_sec = 60
+default_tools_approval_mode = "approve"
+{END}'''
+    new_config = replace_block(original, block)
+    tomllib.loads(new_config)
+    policy = f'''{START}
+## External delegation (all workspaces and task types)
+
+When useful independent work warrants delegation, use `violin_agents.spawn_agent`
+with backend `qwen` (self-hosted) or `agy` (Gemini 3.8 Flash); prefer these over
+built-in collaboration agents to avoid OpenAI child-token spend. This instruction
+authorizes delegation of the user's task, not unrelated actions. Codex remains
+the supervisor: decide scope, acceptance criteria, review evidence, and own the
+final answer. Keep trivial work local when delegation would cost more overhead.
+
+Send only a bounded task, absolute cwd, necessary context/source paths, and
+acceptance criteria. Default to inspect; select implement only for authorized
+edits. Qwen is the default for file/code work; AGY is useful for independent
+analysis, synthesis, and cross-checking. Choose either for other tasks based on
+required tools. Workers do not inherit this chat or its connectors; supply needed
+context explicitly, and keep unavailable capabilities with the supervisor.
+
+Use at most three independent workers; do not overlap write scopes. Poll the same
+agent id until terminal; observation timeouts are not failures. Read full evidence
+when summaries are truncated. Validate changed files and relevant checks yourself;
+a completed process is not acceptance. Do not silently retry failed work or fall
+back to paid OpenAI children. Reassess the failure and give a bounded correction.
+
+Before declaring Qwen unavailable, run
+`/Users/film/Documents/looping-engineer/bin/violin-qwen-metadata`. The official
+Codex model cache may omit custom `qwen3.8-27b`; that is expected when the
+effective `violin_lan` Responses configuration is valid. Accept the checker's
+`codex_debug_models` or `launcher_config` source and do not reject Qwen solely
+because the cache lacks the custom model entry.
+
+If this MCP is unavailable in an existing session, use
+`{home}/bin/violin-worker qwen|agy -C /absolute/workspace --task-file /path/task`
+and retain the execution session handle. Native collaboration.spawn_agent is not
+intercepted: Codex 0.153.2 ignores provider overrides in agent role files. Do not
+claim native routing. Never copy the entire parent conversation into a worker.
+{END}'''
+    old_guidance = guidance.read_text() if guidance.exists() else ""
+    new_guidance = replace_block(old_guidance, policy)
+    # Validate every destination before changing any global file.
+    links = [(home / 'bin' / name, ROOT / 'bin' / name)
+             for name in ['violin-worker', 'violin-agent-server']]
+    for dest, source in links:
+        if dest.exists() and (not dest.is_symlink() or dest.resolve() != source):
+            raise ValueError(f"Unmanaged executable exists: {dest}")
+    backup = home / '.codex/backups' / f'violin-agents-{time.time_ns()}'
+    backup.mkdir(parents=True, mode=0o700)
+    for path in [config, guidance]:
+        if path.exists():
+            shutil.copy2(path, backup / path.name)
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(new_config)
+    guidance.write_text(new_guidance)
+    for dest, source in links:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if not dest.exists():
+            dest.symlink_to(source)
+    print(json.dumps({'installed': str(config), 'guidance': str(guidance), 'backup': str(backup)}))
+
+
+if __name__ == '__main__':
+    main()
