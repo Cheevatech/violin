@@ -42,9 +42,7 @@ def effective_entry():
     models = data.get("models", []) if isinstance(data, dict) else []
     entry = next((m for m in models if isinstance(m, dict) and m.get("slug") == MODEL), None)
     if entry is None:
-        return {"slug": MODEL, "context_window": CONTEXT_WINDOW,
-                "supported_reasoning_levels": [{"effort": "medium"}],
-                "supported_in_api": True}, None
+        return None, "effective metadata does not contain qwen3.8-27b"
     return entry, None
 
 
@@ -97,6 +95,7 @@ def check(cache_path=None, now=None):
     if errors:
         evidence["error"] = "; ".join(errors)
         return False, evidence
+    evidence["status"] = "healthy" if source == "models_cache" else "degraded"
     return True, evidence
 
 

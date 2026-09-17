@@ -35,6 +35,7 @@ assert sys.argv[1] == 'exec'
 assert sys.argv[sys.argv.index('-s')+1] == 'read-only'
 assert 'Codex is the supervisor' in sys.stdin.read()
 pathlib.Path(sys.argv[sys.argv.index('-o')+1]).write_text('evidence verified')
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'done'}}))
 print(json.dumps({'type':'turn.completed','usage':{'input_tokens':42}}))
 """)
         self.assertEqual(code, 0)
@@ -45,6 +46,7 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':42}}))
         code, report = self.run_worker("agy", """import sys,json
 assert sys.argv[sys.argv.index('--model')+1] == 'gemini-3.8-flash-medium'
 assert '--sandbox' in sys.argv
+assert sys.argv[sys.argv.index('--print')+1].startswith('You are a delegated worker.')
 print(json.dumps({'status':'SUCCESS','response':'a'*100,'usage':{'total_tokens':10}}))
 """, "--summary-chars", "20")
         self.assertEqual(code, 0)
@@ -57,9 +59,67 @@ print(json.dumps({'status':'SUCCESS','response':'a'*100,'usage':{'total_tokens':
         self.assertEqual(report["status"], "failed")
 
     def test_missing_result_is_failure(self):
-        code, report = self.run_worker("qwen", "pass")
+        code, report = self.run_worker("qwen", "print('{\"type\":\"turn.completed\"}')")
         self.assertEqual(code, 1)
-        self.assertEqual(report["status"], "failed")
+        self.assertEqual(report["status"], "empty_final_response")
+
+    def test_qwen_item_error_is_provider_error(self):
+        code, report = self.run_worker("qwen", """import json
+print(json.dumps({'type':'item.completed','item':{'type':'error','message':'route unavailable'}}))
+print(json.dumps({'type':'turn.completed'}))
+""")
+        self.assertEqual(code, 1)
+        self.assertEqual(report["failure_reason"], "provider_error")
+        self.assertIn("route unavailable", report["error_message"])
+
+    def test_implement_without_diff_is_no_changes(self):
+        code, report = self.run_worker("qwen", """import json
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'finished'}}))
+print(json.dumps({'type':'turn.completed'}))
+""", "--mode", "implement")
+        self.assertEqual(code, 1)
+        self.assertEqual(report["status"], "no_changes")
+        self.assertTrue(report["final_message_seen"])
+
+    def test_implement_with_diff_is_completed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "tracked.txt").write_text("before")
+            subprocess.run(["git", "add", "tracked.txt"], cwd=root, check=True)
+            subprocess.run(["git", "-c", "user.email=test@example.com", "-c", "user.name=test",
+                            "commit", "-qm", "initial"], cwd=root, check=True)
+            fake = root / "fake"
+            fake.write_text("""#!/usr/bin/env python3
+import json,pathlib
+pathlib.Path('tracked.txt').write_text('after')
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'implemented'}}))
+print(json.dumps({'type':'turn.completed'}))
+""")
+            fake.chmod(0o700)
+            cache = root / "models.json"
+            cache.write_text(json.dumps({"fetched_at": "2099-01-01T00:00:00Z", "models": [{
+                "slug": "qwen3.8-27b", "context_window": 200000,
+                "supported_reasoning_levels": [{"effort": "medium"}],
+                "supported_in_api": True, "provider": "violin_lan", "wire_api": "responses"}]}))
+            env = dict(os.environ, VIOLIN_QWEN_BIN=str(fake), VIOLIN_CODEX_MODELS_CACHE=str(cache),
+                       VIOLIN_WORKER_RUNS=str(root / "runs"))
+            result = subprocess.run([str(RUNNER), "qwen", "--mode", "implement", "-C", directory],
+                                    input="Implement", text=True, capture_output=True, env=env)
+            report = json.loads(result.stdout)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(report["status"], "completed")
+            self.assertEqual(report["changed_files"], ["tracked.txt"])
+
+    def test_metadata_warning_is_degraded(self):
+        code, report = self.run_worker("qwen", """import json
+print('metadata warning: using fallback', flush=True)
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'smoke ok'}}))
+print(json.dumps({'type':'turn.completed'}))
+""")
+        self.assertEqual(code, 0)
+        self.assertEqual(report["status"], "completed")
+        self.assertEqual(report["status_detail"], "metadata_degraded")
 
     def test_timeout(self):
         code, report = self.run_worker("qwen", "import time; time.sleep(30)", "--timeout", "1")
@@ -107,6 +167,7 @@ time.sleep(30)
                                     env=dict(os.environ, VIOLIN_CODEX_BIN=str(fake_codex)))
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("codex_debug_models", result.stdout)
+            self.assertIn('"status": "degraded"', result.stdout)
 
     def test_missing_qwen_metadata_does_not_launch_backend(self):
         checker = Path(__file__).resolve().parents[1] / "bin/violin-qwen-metadata"
@@ -133,15 +194,6 @@ time.sleep(30)
             report = json.loads(result.stdout)
             self.assertEqual(report["status"], "metadata_unavailable")
             self.assertFalse(marker.exists())
-
-    def test_metadata_fallback_warning_is_a_terminal_failure(self):
-        code, report = self.run_worker("qwen", """import time
-print('metadata warning: using fallback', flush=True)
-time.sleep(30)
-""", "--idle-timeout", "10", "--timeout", "10")
-        self.assertEqual(code, 1)
-        self.assertEqual(report["status"], "metadata_unavailable")
-
 
 if __name__ == "__main__":
     unittest.main()

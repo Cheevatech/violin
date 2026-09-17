@@ -19,16 +19,25 @@ class ServerTests(unittest.TestCase):
             "supported_in_api": True, "provider": "violin_lan", "wire_api": "responses"}]}))
         fake = self.root / "fake-qwen"
         fake.write_text("""#!/usr/bin/env python3
-import sys,pathlib,time
+import sys,pathlib,time,json
 task=sys.stdin.read()
 if 'SLOW_TEST' in task: time.sleep(30)
 pathlib.Path(sys.argv[sys.argv.index('-o')+1]).write_text('fixture result')
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'done'}}))
+print(json.dumps({'type':'turn.completed'}))
 """)
         fake.chmod(0o700)
+        fake_agy = self.root / "fake-agy"
+        fake_agy.write_text("""#!/usr/bin/env python3
+import json
+print(json.dumps({"status": "SUCCESS", "response": "agy fixture result"}))
+""")
+        fake_agy.chmod(0o700)
         self.proc = subprocess.Popen([str(SERVER)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True,
             env=dict(os.environ, VIOLIN_QWEN_BIN=str(fake), VIOLIN_WORKER_RUNS=str(self.root/"runs"),
-                     VIOLIN_CODEX_MODELS_CACHE=str(cache)))
+                     VIOLIN_AGY_BIN=str(fake_agy), VIOLIN_CODEX_MODELS_CACHE=str(cache),
+                     VIOLIN_QWEN_MAX_CONCURRENCY="1", VIOLIN_AGY_MAX_CONCURRENCY="2"))
 
     def tearDown(self):
         self.proc.stdin.close()
@@ -55,7 +64,19 @@ pathlib.Path(sys.argv[sys.argv.index('-o')+1]).write_text('fixture result')
         result=self.tool("wait_agent", {"agent_id":job["agent_id"],"wait_seconds":5})
         self.assertEqual(result["status"],"completed")
         self.assertEqual(result["summary"],"fixture result")
+        self.assertEqual(result["requested_backend"], "auto")
+        self.assertEqual(result["selected_backend"], "qwen")
         self.assertTrue(result["supervisor_review_required"])
+
+    def test_auto_falls_back_to_agy_when_qwen_is_full(self):
+        slow = self.tool("spawn_agent", {"cwd":str(self.root),"task":"SLOW_TEST"})
+        self.assertEqual(slow["selected_backend"], "qwen")
+        fallback = self.tool("spawn_agent", {"cwd":str(self.root),"task":"Read fixture"})
+        self.assertEqual(fallback["selected_backend"], "agy")
+        self.assertEqual(fallback["fallback_reason"], "qwen_capacity_full")
+        result = self.tool("wait_agent", {"agent_id":fallback["agent_id"],"wait_seconds":5})
+        self.assertEqual(result["summary"], "agy fixture result")
+        self.tool("interrupt_agent", {"agent_id":slow["agent_id"]})
 
     def test_interrupt_running_worker(self):
         job=self.tool("spawn_agent", {"cwd":str(self.root),"task":"SLOW_TEST"})
