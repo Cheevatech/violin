@@ -15,6 +15,9 @@ RUNNER = Path(__file__).resolve().with_name("violin-worker")
 HEALTH = Path(__file__).resolve().with_name("violin-health")
 JOBS = {}
 DEFAULT_LIMITS = {"qwen": 1, "agy": 2}
+# MCP tool_timeout_sec is 60s. Keep synchronous auto preflight below it so
+# spawn_agent can always return a lease/agent_id or an explicit fallback.
+HEALTH_TIMEOUT = 45
 
 
 def limits():
@@ -95,7 +98,9 @@ def release_lease(path):
 
 def qwen_health():
     try:
-        process = subprocess.run([str(HEALTH)], capture_output=True, text=True, timeout=75)
+        health_env = dict(os.environ, VIOLIN_METADATA_TIMEOUT="8", VIOLIN_SMOKE_TIMEOUT="35")
+        process = subprocess.run([str(HEALTH)], capture_output=True, text=True,
+                                 timeout=HEALTH_TIMEOUT, env=health_env)
         return process.returncode == 0, json.loads(process.stdout)
     except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
         return False, {"status": "qwen_unhealthy", "error": type(exc).__name__}
