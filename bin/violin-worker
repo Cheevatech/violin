@@ -51,6 +51,32 @@ def event_text(event):
                     values.append(part["text"])
     return "\n".join(values)
 
+
+def qwen_smoke(binary, timeout, evidence_path):
+    evidence = {"command": [binary, "smoke"], "timeout_seconds": timeout}
+    try:
+        completed = subprocess.run([binary, "smoke"], capture_output=True, text=True,
+                                   timeout=min(timeout, 60), check=False)
+        evidence.update({"exit_code": completed.returncode, "stdout": completed.stdout,
+                         "stderr": completed.stderr})
+    except subprocess.TimeoutExpired as exc:
+        evidence.update({"exit_code": None, "stdout": exc.stdout or "",
+                         "stderr": exc.stderr or "", "error": "smoke_timeout"})
+        atomic_json(evidence_path, evidence)
+        return False, "smoke_timeout"
+    except OSError as exc:
+        evidence.update({"exit_code": None, "error": f"smoke_launch_error: {type(exc).__name__}"})
+        atomic_json(evidence_path, evidence)
+        return False, evidence["error"]
+    atomic_json(evidence_path, evidence)
+    output = evidence["stdout"]
+    if completed.returncode != 0:
+        return False, f"smoke_exit_{completed.returncode}"
+    required = ("QWEN_SMOKE_OK", "qwen3.8-27b", "violin_lan")
+    if any(marker not in output for marker in required):
+        return False, "smoke_marker_missing"
+    return True, None
+
 METADATA = Path(__file__).resolve().with_name("violin-qwen-metadata")
 
 
@@ -186,6 +212,21 @@ Task:
             print(json.dumps(report, ensure_ascii=False))
             return 1
         metadata_degraded = metadata.get("status") == "degraded"
+        qwen_binary = os.environ.get("VIOLIN_QWEN_BIN", str(Path.home() / "bin/violin-codex-qwen"))
+        smoke_ok, smoke_error = qwen_smoke(qwen_binary, args.timeout, run / "smoke.json")
+        if not smoke_ok:
+            report = {"status": "qwen_unhealthy", "backend": "qwen", "exit_code": None,
+                      "duration_seconds": round(time.monotonic() - activity.started, 2),
+                      "evidence": str(run), "phase": "failed", "metadata": metadata,
+                      "summary": "", "summary_truncated": False, "supervisor_review_required": True,
+                      "final_message_seen": False, "changed_files": [],
+                      "git_diff_check": {"before_status_exit": None, "after_status_exit": None,
+                                         "new_changed_files": []},
+                      "error_message": smoke_error, "smoke": str(run / "smoke.json")}
+            atomic_json(run / "report.json", report)
+            activity.event("failed")
+            print(json.dumps(report, ensure_ascii=False))
+            return 1
     else:
         metadata_degraded = False
     baseline_git_code, baseline_git = git_state(cwd)

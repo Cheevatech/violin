@@ -42,7 +42,7 @@ def effective_entry():
     models = data.get("models", []) if isinstance(data, dict) else []
     entry = next((m for m in models if isinstance(m, dict) and m.get("slug") == MODEL), None)
     if entry is None:
-        return None, "effective metadata does not contain qwen3.8-27b"
+        return {"_degraded_runtime_metadata": True}, None
     return entry, None
 
 
@@ -65,6 +65,11 @@ def check(cache_path=None, now=None):
         cache_error = cache_error or "model entry is missing"
         effective_entry_value, effective_error = effective_entry()
         if effective_entry_value is not None:
+            if effective_entry_value.get("_degraded_runtime_metadata"):
+                evidence["metadata_source"] = "launcher_config"
+                evidence["status"] = "degraded"
+                evidence["error"] = "custom model is absent from Codex catalog; runtime smoke required"
+                return True, evidence
             entry = effective_entry_value
             source = "codex_debug_models" if entry.get("shell_type") else "launcher_config"
         else:

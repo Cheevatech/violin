@@ -20,6 +20,9 @@ class ServerTests(unittest.TestCase):
         fake = self.root / "fake-qwen"
         fake.write_text("""#!/usr/bin/env python3
 import sys,pathlib,time,json
+if len(sys.argv) > 1 and sys.argv[1] == 'smoke':
+ print('QWEN_SMOKE_OK model=qwen3.8-27b provider=violin_lan')
+ raise SystemExit(0)
 task=sys.stdin.read()
 if 'SLOW_TEST' in task: time.sleep(30)
 pathlib.Path(sys.argv[sys.argv.index('-o')+1]).write_text('fixture result')

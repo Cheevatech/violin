@@ -13,7 +13,12 @@ class WorkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             fake = root / "fake"
-            fake.write_text("#!/usr/bin/env python3\n" + script)
+            fake.write_text("""#!/usr/bin/env python3
+import sys
+if len(sys.argv) > 1 and sys.argv[1] == 'smoke':
+    print('QWEN_SMOKE_OK model=qwen3.8-27b provider=violin_lan')
+    raise SystemExit(0)
+""" + script)
             fake.chmod(0o700)
             env = dict(os.environ, VIOLIN_WORKER_RUNS=str(root / "runs"))
             env["VIOLIN_" + backend.upper() + "_BIN"] = str(fake)
@@ -92,6 +97,10 @@ print(json.dumps({'type':'turn.completed'}))
             fake = root / "fake"
             fake.write_text("""#!/usr/bin/env python3
 import json,pathlib
+import sys
+if len(sys.argv) > 1 and sys.argv[1] == 'smoke':
+ print('QWEN_SMOKE_OK model=qwen3.8-27b provider=violin_lan')
+ raise SystemExit(0)
 pathlib.Path('tracked.txt').write_text('after')
 print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'implemented'}}))
 print(json.dumps({'type':'turn.completed'}))
