@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Delegation Protocol v1 worker report",
+  "type": "object",
+  "required": ["status", "backend", "exit_code", "final_message_seen", "changed_files", "git_diff_check", "evidence", "metadata_status", "smoke_status"],
+  "properties": {
+    "status": {"type": "string"},
+    "backend": {"enum": ["qwen", "agy"]},
+    "exit_code": {"type": ["integer", "null"]},
+    "final_message_seen": {"type": "boolean"},
+    "changed_files": {"type": "array", "items": {"type": "string"}},
+    "git_diff_check": {"type": "object"},
+    "evidence": {"type": "string"},
+    "error_message": {"type": "string"},
+    "metadata_status": {"enum": ["healthy", "degraded", "unavailable", "not_applicable"]},
+    "smoke_status": {"enum": ["passed", "failed", "not_run", "not_applicable"]}
+  },
+  "additionalProperties": true
+}

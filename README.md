@@ -25,17 +25,18 @@ and an evidence directory under `~/.local/state/violin-workers`. Full logs and
 the full result remain there when the summary is truncated. A completed worker
 still requires Codex to inspect evidence and relevant validation before accepting
 the task. Nonzero exits, missing results, backend errors, and timeouts fail the
-run. No automatic retry or paid-model fallback occurs.
+run. The report follows `schemas/worker-report.schema.json`. No automatic
+retry occurs, and a partial Qwen implementation is never retried on AGY.
 
 `VIOLIN_QWEN_BIN`, `VIOLIN_AGY_BIN`, and `VIOLIN_WORKER_RUNS` override executable
 and evidence locations. Default timeout is 900 seconds; `--timeout` changes it.
-Qwen requires valid effective metadata for `qwen3.8-27b`. Preflight checks the
-cache first, then renders the effective Codex catalog with the pinned
-`violin_lan` Responses configuration when the custom model is absent from the
-official cache. It verifies the context window, reasoning modes, provider, and
-Responses API support before starting Codex. If both sources are unavailable or
-stale it returns `metadata_unavailable`; it never silently uses fallback
-metadata. Set `VIOLIN_CODEX_MODELS_CACHE` to inspect a specific cache file.
+Qwen preflight is shared by `bin/violin-health` and `bin/violin-worker`. It
+reports metadata as `healthy`, `degraded`, or `unavailable`, then runs a real
+runtime smoke that proves the final response contains the pinned model and
+provider. A custom model missing from the catalog is `degraded`, not synthetic
+`healthy`; it is usable when smoke passes. Otherwise the worker reports
+`metadata_unavailable` or `qwen_unhealthy`. Set `VIOLIN_CODEX_MODELS_CACHE` to
+inspect a specific cache file.
 
 Each run contains an atomic `status.json` with only phase, last activity,
 elapsed time, PID, hard-timeout deadline, command type, and evidence directory.
@@ -49,8 +50,9 @@ event or heartbeat; configure it with `--idle-timeout` or
 
 When a run stops, inspect `report.json`, `status.json`, `metadata.json`,
 `process.json`, `stdout.log`, and `stderr.log` under the reported evidence path.
-`metadata_unavailable`, `idle_timeout`, `timeout`, `interrupted`, and
-`failure_reason: provider_failure` identify different failure causes. A worker
+`metadata_unavailable`, `qwen_unhealthy`, `provider_error`,
+`empty_final_response`, `idle_timeout`, `timeout`, `no_changes`, and
+`interrupted` identify different failure causes. A worker
 PID is recorded in `process.json`; the long-running `violin-agent-server` has a
 different parent process and owns the MCP stdio pipe. The investigated incident
 occurred after a successful shell command during turn progression, which is why
@@ -59,9 +61,10 @@ command completion and later silence are tracked separately.
 Qwen currently reports zero usage through this gateway; that is missing metering,
 not proof of zero tokens. No percentage of Codex token savings is claimed.
 
-`bin/install-violin-agents` installs the MCP server and global supervisor
-guidance into `~/.codex`, with a timestamped backup. It refuses to overwrite an
-unmanaged existing server and validates TOML before changing anything. The
+`bin/install-violin-agents` installs the MCP server, canonical worker, health
+check, launcher, gate, and report schema from this repository, with a
+timestamped backup. It refuses to overwrite unmanaged files and validates TOML
+before changing anything. The
 MCP route was tested through Codex's real tool protocol; native
 `collaboration.spawn_agent` remains unsupported for this external provider in
 Codex 0.153.2.

@@ -9,9 +9,96 @@ import sys
 import tempfile
 import time
 import uuid
+import fcntl
 
 RUNNER = Path(__file__).resolve().with_name("violin-worker")
+HEALTH = Path(__file__).resolve().with_name("violin-health")
 JOBS = {}
+DEFAULT_LIMITS = {"qwen": 1, "agy": 2}
+
+
+def limits():
+    values = {}
+    for backend, default in DEFAULT_LIMITS.items():
+        try:
+            value = int(os.environ.get(f"VIOLIN_{backend.upper()}_MAX_CONCURRENCY", default))
+        except ValueError:
+            value = default
+        values[backend] = max(0, value)
+    return values
+
+
+def lease_paths(root):
+    directory = root / "leases"
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return directory, directory / ".lock"
+
+
+def process_alive(pid):
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
+def reserve(root, requested):
+    directory, lock_path = lease_paths(root)
+    quota = limits()
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        active = []
+        for path in directory.glob("*.json"):
+            try:
+                lease = json.loads(path.read_text())
+            except (ValueError, OSError):
+                path.unlink(missing_ok=True)
+                continue
+            if not process_alive(lease.get("server_pid")) or (
+                lease.get("worker_pid") is not None and not process_alive(lease.get("worker_pid"))
+            ):
+                path.unlink(missing_ok=True)
+                continue
+            active.append((path, lease))
+        order = ["qwen", "agy"] if requested == "auto" else [requested]
+        selected = next((backend for backend in order
+                         if sum(x.get("backend") == backend for _, x in active) < quota[backend]), None)
+        if selected is None:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            return None, {backend: sum(x.get("backend") == backend for _, x in active)
+                           for backend in DEFAULT_LIMITS}, quota
+        lease_path = directory / f"{uuid.uuid4()}.json"
+        lease_path.write_text(json.dumps({"backend": selected, "server_pid": os.getpid(),
+                                          "worker_pid": None, "created_at": time.time()}))
+        fcntl.flock(lock, fcntl.LOCK_UN)
+    return lease_path, {backend: sum(x.get("backend") == backend for _, x in active)
+                        for backend in DEFAULT_LIMITS}, quota
+
+
+def update_lease(path, worker_pid):
+    if path is None:
+        return
+    try:
+        value = json.loads(path.read_text())
+        value["worker_pid"] = worker_pid
+        path.write_text(json.dumps(value))
+    except (ValueError, OSError):
+        pass
+
+
+def release_lease(path):
+    if path is not None:
+        path.unlink(missing_ok=True)
+
+
+def qwen_health():
+    try:
+        process = subprocess.run([str(HEALTH)], capture_output=True, text=True, timeout=75)
+        return process.returncode == 0, json.loads(process.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        return False, {"status": "qwen_unhealthy", "error": type(exc).__name__}
 
 
 def snapshot(job):
@@ -25,6 +112,7 @@ def snapshot(job):
     except (ValueError, OSError):
         pass
     if code is not None:
+        release_lease(job.get("lease"))
         try:
             report = json.loads(job["output"].read_text())
             result.update(report)
@@ -36,18 +124,16 @@ def snapshot(job):
 
 def dispatch(name, args):
     if name == "spawn_agent":
-        backend = args.get("backend", "qwen")
+        requested_backend = args.get("backend", "auto")
         mode = args.get("mode", "inspect")
         task = args.get("task", "")
         cwd = Path(args.get("cwd", "")).expanduser()
-        if backend not in ("qwen", "agy") or mode not in ("inspect", "implement"):
+        if requested_backend not in ("qwen", "agy", "auto") or mode not in ("inspect", "implement"):
             raise ValueError("Invalid backend or mode")
         if not isinstance(task, str) or not task.strip():
             raise ValueError("A nonempty task is required")
         if not cwd.is_absolute() or not cwd.is_dir():
             raise ValueError("cwd must be an existing absolute directory")
-        if sum(j["process"].poll() is None for j in JOBS.values()) >= 3:
-            raise ValueError("Three workers are already running; collect a result first")
         timeout = args.get("timeout_seconds", 900)
         if type(timeout) is not int or not 1 <= timeout <= 3600:
             raise ValueError("timeout_seconds must be between 1 and 3600")
@@ -56,6 +142,16 @@ def dispatch(name, args):
             raise ValueError("idle_timeout_seconds must be between 1 and 3600")
         root = Path(os.environ.get("VIOLIN_WORKER_RUNS", str(Path.home() / ".local/state/violin-workers")))
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        health_failed, health_evidence = False, None
+        if requested_backend == "auto":
+            healthy, health_evidence = qwen_health()
+            health_failed = not healthy
+        lease, counts, quota = reserve(root, "agy" if health_failed else requested_backend)
+        if lease is None:
+            raise ValueError(json.dumps({"error": "worker capacity is full",
+                                         "requested_backend": requested_backend,
+                                         "capacity_snapshot": counts, "quotas": quota}))
+        backend = json.loads(lease.read_text())["backend"]
         directory = Path(tempfile.mkdtemp(prefix="agent-", dir=root))
         taskfile = directory / "task.txt"
         taskfile.write_text(task)
@@ -66,17 +162,31 @@ def dispatch(name, args):
                                            "timeout_deadline": None, "command_type": None,
                                            "evidence": str(directory)}))
         worker_env = dict(os.environ, VIOLIN_WORKER_STATUS=str(status_path))
-        with output.open("w") as out, (directory / "server-stderr.log").open("w") as err:
-            proc = subprocess.Popen([str(RUNNER), backend, "--mode", mode, "-C", str(cwd),
-                                     "--task-file", str(taskfile), "--timeout", str(timeout),
-                                     "--idle-timeout", str(idle_timeout)],
-                                    stdin=subprocess.DEVNULL, stdout=out, stderr=err, env=worker_env,
-                                    start_new_session=True)
+        try:
+            with output.open("w") as out, (directory / "server-stderr.log").open("w") as err:
+                proc = subprocess.Popen([str(RUNNER), backend, "--mode", mode, "-C", str(cwd),
+                                         "--task-file", str(taskfile), "--timeout", str(timeout),
+                                         "--idle-timeout", str(idle_timeout)],
+                                        stdin=subprocess.DEVNULL, stdout=out, stderr=err, env=worker_env,
+                                        start_new_session=True)
+        except OSError:
+            release_lease(lease)
+            raise
+        update_lease(lease, proc.pid)
         agent_id = str(uuid.uuid4())
         job = {"id": agent_id, "backend": backend, "process": proc, "output": output,
-               "status": directory / "status.json"}
+               "status": directory / "status.json", "lease": lease,
+               "requested_backend": requested_backend, "capacity_snapshot": counts,
+               "quota": quota, "fallback_reason": "qwen_health_failed" if health_failed else "qwen_capacity_full"}
         JOBS[agent_id] = job
-        return snapshot(job)
+        result = snapshot(job)
+        result.update({"requested_backend": requested_backend, "selected_backend": backend,
+                       "capacity_snapshot": counts, "quotas": quota})
+        if requested_backend == "auto" and backend != "qwen":
+            result["fallback_reason"] = "qwen_health_failed" if health_failed else "qwen_capacity_full"
+            if health_failed:
+                result["health_evidence"] = health_evidence
+        return result
     if name == "list_agents":
         return [{k: v for k, v in snapshot(job).items() if k in
                  ("agent_id", "backend", "status", "evidence")} for job in JOBS.values()]
@@ -92,7 +202,13 @@ def dispatch(name, args):
             job["process"].wait(timeout=seconds)
         except subprocess.TimeoutExpired:
             pass
-        return snapshot(job)
+        result = snapshot(job)
+        result.update({"requested_backend": job["requested_backend"],
+                       "selected_backend": job["backend"],
+                       "capacity_snapshot": job["capacity_snapshot"], "quotas": job["quota"]})
+        if job["requested_backend"] == "auto" and job["backend"] != "qwen":
+            result["fallback_reason"] = job.get("fallback_reason", "qwen_capacity_full")
+        return result
     if name == "interrupt_agent":
         if job["process"].poll() is None:
             # The runner handles SIGINT and terminates its backend process group.
@@ -111,8 +227,8 @@ def schema(properties, required=()):
 
 
 TOOLS = [
-    {"name": "spawn_agent", "description": "Delegate a bounded task to self-hosted Qwen or AGY Gemini 3.8 Flash. Returns a live agent id immediately. Codex retains final review. Send only necessary task/context, absolute workspace, scope and acceptance criteria; no full chat history. Use inspect unless edits are authorized.",
-     "inputSchema": schema({"backend": {"type": "string", "enum": ["qwen", "agy"]},
+    {"name": "spawn_agent", "description": "Delegate a bounded task to self-hosted Qwen or AGY Gemini 3.8 Flash. Auto prefers Qwen and falls back to AGY only when Qwen capacity is full. Returns a live agent id immediately. Codex retains final review. Send only necessary task/context, scope and acceptance criteria; no full chat history. Use inspect unless edits are authorized.",
+     "inputSchema": schema({"backend": {"type": "string", "enum": ["auto", "qwen", "agy"]},
         "task": {"type": "string"}, "cwd": {"type": "string"},
         "mode": {"type": "string", "enum": ["inspect", "implement"]},
         "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},

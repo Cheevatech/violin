@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+# Source-controlled launcher installed by install-violin-agents.
+root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+metadata_checker=$root/violin-qwen-metadata
+[ -x "$metadata_checker" ] || { printf '%s\n' 'metadata_unavailable: checker missing' >&2; exit 78; }
+metadata_error=$($metadata_checker 2>&1) || { printf '%s\n' "metadata_unavailable: $metadata_error" >&2; exit 78; }
+if [ -z "${LLMUX_API_KEY:-}" ] && command -v security >/dev/null 2>&1; then
+  LLMUX_API_KEY=$(security find-generic-password -a "$USER" -s violin-llmux-api-key -w 2>/dev/null || true); export LLMUX_API_KEY
+fi
+[ -n "${LLMUX_API_KEY:-}" ] || { printf '%s\n' 'LLMUX_API_KEY is missing and Keychain item violin-llmux-api-key was not found.' >&2; exit 2; }
+reasoning_effort=medium
+if [ "${1:-}" = smoke ]; then
+  shift; [ "$#" -eq 0 ] || { printf '%s\n' 'usage: violin-codex-qwen smoke' >&2; exit 2; }
+  set -- exec --ignore-user-config --skip-git-repo-check --ephemeral -s read-only 'Reply exactly QWEN_SMOKE_OK; runtime model=qwen3.8-27b provider=violin_lan. Do not use tools.'
+  reasoning_effort=low
+elif [ "${1:-}" = exec ]; then shift; set -- exec --ignore-user-config "$@"; fi
+codex_bin=${VIOLIN_CODEX_BIN:-/opt/homebrew/bin/codex}
+[ -x "$codex_bin" ] || codex_bin=$(command -v codex 2>/dev/null || true)
+[ -n "$codex_bin" ] && [ -x "$codex_bin" ] || { printf '%s\n' 'violin-codex-qwen: Codex CLI binary not found.' >&2; exit 127; }
+exec "$codex_bin" -c 'model="qwen3.8-27b"' -c "model_reasoning_effort=\"$reasoning_effort\"" -c 'model_provider="violin_lan"' -c 'model_context_window=200000' -c 'model_providers.violin_lan.name="Violin Qwen 3.8 27B (LAN)"' -c 'model_providers.violin_lan.base_url="https://llm.cheevatech.com/v1"' -c 'model_providers.violin_lan.wire_api="responses"' -c 'model_providers.violin_lan.env_key="LLMUX_API_KEY"' "$@"

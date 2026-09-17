@@ -54,8 +54,11 @@ Platform guidance: this is macOS. Prefer portable commands such as sed, awk, od,
 User task:
 $prompt"
 
-set -- exec --skip-git-repo-check -s "$sandbox"
-[ -n "$workspace" ] && set -- "$@" -C "$workspace"
-[ -n "$json" ] && set -- "$@" --json
-set -- "$@" "$full_prompt"
-exec /Users/film/bin/violin-codex-qwen "$@"
+root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+worker_mode=inspect
+[ "$mode" = implement ] && worker_mode=implement
+if [ -n "$workspace" ]; then
+  printf '%s' "$full_prompt" | "$root/violin-worker" qwen --mode "$worker_mode" -C "$workspace"
+else
+  printf '%s' "$full_prompt" | "$root/violin-worker" qwen --mode "$worker_mode"
+fi

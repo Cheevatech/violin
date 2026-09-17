@@ -18,11 +18,11 @@ if ! "$timeout_runner" 180 "$root/bin/qwen-mode" plan -C "$repo" --json -- 'Insp
   cat "$tmp/plan.err" "$tmp/plan.jsonl" >&2
   exit 1
 fi
-if grep -Eq 'turn.failed|no deployment|Service Unavailable' "$tmp/plan.jsonl"; then
+if grep -Eq '"status": "(provider_error|qwen_unhealthy|metadata_unavailable)"|no deployment|Service Unavailable' "$tmp/plan.jsonl"; then
   cat "$tmp/plan.err" "$tmp/plan.jsonl" >&2
   exit 1
 fi
-grep -q 'turn.completed' "$tmp/plan.jsonl"
+grep -q '"status": "completed"' "$tmp/plan.jsonl"
 test -z "$(git -C "$repo" status --short)"
 
 printf '%s\n' '[implement]'
@@ -30,11 +30,11 @@ if ! "$timeout_runner" 600 "$root/bin/qwen-mode" implement -C "$repo" --json -- 
   cat "$tmp/implement.err" "$tmp/implement.jsonl" >&2
   exit 1
 fi
-if grep -Eq 'turn.failed|no deployment|Service Unavailable' "$tmp/implement.jsonl"; then
+if grep -Eq '"status": "(provider_error|qwen_unhealthy|metadata_unavailable|no_changes)"|no deployment|Service Unavailable' "$tmp/implement.jsonl"; then
   cat "$tmp/implement.err" "$tmp/implement.jsonl" >&2
   exit 1
 fi
-grep -q 'turn.completed' "$tmp/implement.jsonl"
+grep -q '"status": "completed"' "$tmp/implement.jsonl"
 grep -qx 'updated' "$repo/message.txt"
 
 printf '%s\n' '[verify gate]'

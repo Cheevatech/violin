@@ -1,393 +1,153 @@
 #!/usr/bin/env python3
-"""Run a bounded external worker; keep full evidence outside parent context."""
-import argparse
-import json
-import os
+"""Canonical bounded worker for Qwen and AGY (Delegation Protocol v1)."""
+import argparse, json, os, signal, subprocess, sys, tempfile, threading, time
 from pathlib import Path
-import signal
-import subprocess
-import sys
-import tempfile
-import threading
-import time
 
+ROOT = Path(__file__).resolve().parent
+HEALTH = ROOT / "violin-health"
+
+def atomic_json(path, value):
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2)); os.replace(tmp, path)
 
 def git_state(cwd):
     try:
-        result = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"],
-                                cwd=cwd, capture_output=True, text=True, check=False)
-        return result.returncode, set(line for line in result.stdout.splitlines() if line)
-    except OSError:
-        return 1, set()
+        p = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=cwd, capture_output=True, text=True, check=False)
+        return p.returncode, set(x for x in p.stdout.splitlines() if x)
+    except OSError: return 1, set()
 
-
-def changed_paths(before, after, cwd, ignored_root=None):
-    paths = set()
+def changed_paths(before, after, cwd, ignored):
+    result = set()
     for line in after - before:
-        if len(line) >= 4:
-            path = line[3:]
-            if ignored_root is not None:
-                candidate = (cwd / path).resolve()
-                try:
-                    candidate.relative_to(ignored_root)
-                    continue
-                except ValueError:
-                    pass
-            paths.add(path)
-    return sorted(paths)
-
+        path = line[3:] if len(line) >= 4 else line
+        try: (cwd / path).resolve().relative_to(ignored)
+        except ValueError: result.add(path)
+    return sorted(result)
 
 def event_text(event):
-    item = event.get("item") if isinstance(event.get("item"), dict) else {}
-    values = []
+    values = []; item = event.get("item") if isinstance(event.get("item"), dict) else {}
     for value in (item.get("text"), item.get("content"), item.get("message"), event.get("text"), event.get("message")):
-        if isinstance(value, str):
-            values.append(value)
+        if isinstance(value, str): values.append(value)
         elif isinstance(value, list):
             for part in value:
-                if isinstance(part, str):
-                    values.append(part)
-                elif isinstance(part, dict) and isinstance(part.get("text"), str):
-                    values.append(part["text"])
+                if isinstance(part, str): values.append(part)
+                elif isinstance(part, dict) and isinstance(part.get("text"), str): values.append(part["text"])
     return "\n".join(values)
-
-
-def qwen_smoke(binary, timeout, evidence_path):
-    evidence = {"command": [binary, "smoke"], "timeout_seconds": timeout}
-    try:
-        completed = subprocess.run([binary, "smoke"], capture_output=True, text=True,
-                                   timeout=min(timeout, 60), check=False)
-        evidence.update({"exit_code": completed.returncode, "stdout": completed.stdout,
-                         "stderr": completed.stderr})
-    except subprocess.TimeoutExpired as exc:
-        evidence.update({"exit_code": None, "stdout": exc.stdout or "",
-                         "stderr": exc.stderr or "", "error": "smoke_timeout"})
-        atomic_json(evidence_path, evidence)
-        return False, "smoke_timeout"
-    except OSError as exc:
-        evidence.update({"exit_code": None, "error": f"smoke_launch_error: {type(exc).__name__}"})
-        atomic_json(evidence_path, evidence)
-        return False, evidence["error"]
-    atomic_json(evidence_path, evidence)
-    output = evidence["stdout"]
-    if completed.returncode != 0:
-        return False, f"smoke_exit_{completed.returncode}"
-    required = ("QWEN_SMOKE_OK", "qwen3.8-27b", "violin_lan")
-    if any(marker not in output for marker in required):
-        return False, "smoke_marker_missing"
-    return True, None
-
-METADATA = Path(__file__).resolve().with_name("violin-qwen-metadata")
-
-
-def atomic_json(path, value):
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2))
-    os.replace(temporary, path)
-
 
 class Activity:
     def __init__(self, path, deadline):
-        self.path, self.deadline = path, deadline
-        self.started = time.monotonic()
-        self.last_event = self.started
-        self.last_event_at = time.time()
-        self.phase, self.command_type, self.pid, self.failure_reason = "starting", None, None, None
-        self.lock = threading.Lock()
-
+        self.path, self.deadline = path, deadline; self.started = time.monotonic(); self.last_event = self.started
+        self.last_event_at = time.time(); self.phase = "starting"; self.command_type = self.pid = None; self.lock = threading.Lock()
     def write(self):
-        atomic_json(self.path, {"phase": self.phase, "last_event_at": self.last_event_at,
-                                "elapsed_seconds": round(time.monotonic() - self.started, 2),
-                                "pid": self.pid, "timeout_deadline": self.deadline,
-                                "command_type": self.command_type, "evidence": str(self.path.parent)})
-
+        atomic_json(self.path, {"phase": self.phase, "last_event_at": self.last_event_at, "elapsed_seconds": round(time.monotonic()-self.started, 2), "pid": self.pid, "timeout_deadline": self.deadline, "command_type": self.command_type, "evidence": str(self.path.parent)})
     def event(self, phase, command_type=None):
         with self.lock:
             self.phase = phase
-            if command_type:
-                self.command_type = command_type
-            self.last_event = time.monotonic()
-            self.last_event_at = time.time()
-            self.write()
-
+            if command_type: self.command_type = command_type
+            self.last_event = time.monotonic(); self.last_event_at = time.time(); self.write()
     def heartbeat(self):
-        with self.lock:
-            self.write()
+        with self.lock: self.write()
 
+def terminate(proc):
+    if proc is None or proc.poll() is not None: return
+    try: proc.stdin.close()
+    except (AttributeError, OSError): pass
+    try: os.killpg(proc.pid, signal.SIGTERM); proc.wait(timeout=5)
+    except subprocess.TimeoutExpired: os.killpg(proc.pid, signal.SIGKILL); proc.wait()
+    except ProcessLookupError: proc.wait()
 
 def command(backend, mode, cwd, result, timeout, prompt):
     if backend == "qwen":
-        return [os.environ.get("VIOLIN_QWEN_BIN", str(Path.home() / "bin/violin-codex-qwen")),
-                "exec", "--ephemeral", "--skip-git-repo-check", "-C", str(cwd),
-                "-s", "workspace-write" if mode == "implement" else "read-only",
-                "--json", "-o", str(result), "-"]
-    # AGY's --print option requires the prompt as its argument; unlike Qwen it
-    # does not consume the prompt from stdin in this invocation mode.
-    return [os.environ.get("VIOLIN_AGY_BIN", str(Path.home() / ".local/bin/agy")),
-            "--add-dir", str(cwd), "--model", "gemini-3.8-flash-medium", "--mode",
-            "accept-edits" if mode == "implement" else "plan", "--sandbox",
-            "--output-format", "json", "--print-timeout", f"{timeout}s", "--print", prompt]
+        return [os.environ.get("VIOLIN_QWEN_BIN", str(Path.home()/"bin/violin-codex-qwen")), "exec", "--ephemeral", "--skip-git-repo-check", "-C", str(cwd), "-s", "workspace-write" if mode == "implement" else "read-only", "--json", "-o", str(result), "-"]
+    return [os.environ.get("VIOLIN_AGY_BIN", str(Path.home()/".local/bin/agy")), "--add-dir", str(cwd), "--model", "gemini-3.8-flash-medium", "--mode", "accept-edits" if mode == "implement" else "plan", "--sandbox", "--output-format", "json", "--print-timeout", f"{timeout}s", "--print", prompt]
 
-
-def terminate_process(proc):
-    if proc is None or proc.poll() is not None:
-        return
+def health(run, deadline):
     try:
-        proc.stdin.close()
-    except (AttributeError, OSError):
-        pass
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
-        proc.wait()
-    except ProcessLookupError:
-        proc.wait()
+        p = subprocess.run([str(HEALTH)], capture_output=True, text=True, timeout=max(1, min(60, int(deadline-time.monotonic())))); value = json.loads(p.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc: p = None; value = {"status":"metadata_unavailable", "error":type(exc).__name__}
+    atomic_json(run/"health.json", value); atomic_json(run/"metadata.json", value.get("metadata", {"status":"unavailable", "error":value.get("error")}))
+    if p is None or p.returncode == 78: return value, "metadata_unavailable"
+    if p.returncode != 0: return value, "qwen_unhealthy"
+    return value, None
 
-
-def metadata_preflight(run):
-    completed = subprocess.run([str(METADATA)], capture_output=True, text=True)
-    try:
-        evidence = json.loads(completed.stdout)
-    except (ValueError, TypeError):
-        evidence = {"error": "metadata checker returned invalid evidence"}
-    atomic_json(run / "metadata.json", evidence)
-    return completed.returncode == 0, evidence
-
+def make_report(status, backend, code, run, started, activity, metadata, metadata_status, smoke_status, final, changed, diff, error=None, usage=None, summary="", summary_chars=6000):
+    try: phase = json.loads(activity.path.read_text()).get("phase")
+    except (OSError, ValueError): phase = "failed"
+    report = {"status":status, "backend":backend, "exit_code":code, "duration_seconds":round(time.monotonic()-started,2), "evidence":str(run), "phase":phase, "metadata":metadata, "metadata_status":metadata_status, "smoke_status":smoke_status, "usage":usage, "summary":summary[:summary_chars], "summary_truncated":len(summary)>summary_chars, "supervisor_review_required":True, "final_message_seen":final, "changed_files":changed, "git_diff_check":diff}
+    if error: report["error_message"] = error
+    if status in ("provider_error", "qwen_unhealthy") or (error and status == "failed"):
+        report["failure_reason"] = "provider_error" if status != "qwen_unhealthy" else status
+    return report
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("backend", choices=["qwen", "agy"])
-    parser.add_argument("--mode", choices=["inspect", "implement"], default="inspect")
-    parser.add_argument("-C", "--cwd", type=Path, default=Path.cwd())
-    parser.add_argument("--task-file", type=Path)
-    parser.add_argument("--timeout", type=int, default=900)
-    parser.add_argument("--idle-timeout", type=int, default=300)
-    parser.add_argument("--summary-chars", type=int, default=6000)
-    args = parser.parse_args()
-    if args.timeout <= 0 or args.idle_timeout <= 0 or args.summary_chars <= 0:
-        parser.error("timeout, idle-timeout and summary-chars must be positive")
-    cwd = args.cwd.resolve(strict=True)
-    if not cwd.is_dir():
-        parser.error("cwd must be a directory")
-    task = args.task_file.read_text() if args.task_file else sys.stdin.read()
-    if not task.strip():
-        parser.error("a non-empty task is required")
-    root = Path(os.environ.get("VIOLIN_WORKER_RUNS", str(Path.home() / ".local/state/violin-workers")))
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    run = Path(tempfile.mkdtemp(prefix=f"{args.backend}-", dir=root))
-    result, started = run / "result.txt", time.monotonic()
-    policy = ("Inspect only; do not change files." if args.mode == "inspect" else
-              "Change only the assigned scope. Inspect the resulting diff and run relevant validation.")
-    prompt = f"""You are a delegated worker. Codex is the supervisor and makes final decisions.
+    ap=argparse.ArgumentParser(description=__doc__); ap.add_argument("backend", choices=["qwen","agy"]); ap.add_argument("--mode",choices=["inspect","implement"],default="inspect"); ap.add_argument("-C","--cwd",type=Path,default=Path.cwd()); ap.add_argument("--task-file",type=Path); ap.add_argument("--timeout",type=int,default=900); ap.add_argument("--idle-timeout",type=int,default=300); ap.add_argument("--summary-chars",type=int,default=6000); a=ap.parse_args()
+    if min(a.timeout,a.idle_timeout,a.summary_chars)<=0: ap.error("timeouts and summary-chars must be positive")
+    cwd=a.cwd.resolve(strict=True); task=a.task_file.read_text() if a.task_file else sys.stdin.read()
+    if not task.strip(): ap.error("a non-empty task is required")
+    root=Path(os.environ.get("VIOLIN_WORKER_RUNS",str(Path.home()/".local/state/violin-workers"))); root.mkdir(parents=True,exist_ok=True,mode=0o700); run=Path(tempfile.mkdtemp(prefix=f"{a.backend}-",dir=root)); started=time.monotonic(); deadline=started+a.timeout; result=run/"result.txt"
+    activity=Activity(Path(os.environ.get("VIOLIN_WORKER_STATUS",str(run/"status.json"))),time.time()+a.timeout); activity.write(); metadata=None; metadata_status="not_applicable"; smoke_status="not_applicable"
+    if a.backend=="qwen":
+        metadata,failure=health(run,deadline); metadata_status=metadata.get("metadata_status","unavailable"); smoke_status=metadata.get("smoke_status","not_run")
+        if failure:
+            report=make_report(failure,a.backend,None,run,started,activity,metadata,metadata_status,smoke_status,False,[],{},metadata.get("error")); atomic_json(run/"report.json",report); print(json.dumps(report,ensure_ascii=False)); return 1
+    baseline_code,baseline=git_state(cwd); policy="Inspect only; do not change files." if a.mode=="inspect" else "Change only the assigned scope. Inspect the resulting diff and run relevant validation."
+    prompt=f"""You are a delegated worker. Codex is the supervisor and makes final decisions.
 Assigned workspace (absolute path): {cwd}
-Resolve all task-relative paths against that directory even if your terminal starts elsewhere.
-Do not search supervisor session logs, enumerate environment variables, or discover unrelated workspaces.
-{policy}
-Follow applicable AGENTS.md and CLAUDE.md. Do not delegate further.
-Do not send messages, publish, deploy, or perform destructive actions unless explicitly authorized in the task.
-Report concise findings, evidence paths, commands and exit statuses, changed files,
-and unresolved limitations. Never claim checks that were not run. Target <= 1200 words.
-For Qwen semantic navigation use /Users/film/bin/serena-bridge; a tool error is not evidence.
+Resolve all task-relative paths against that directory. {policy}
+Follow applicable AGENTS.md and CLAUDE.md. Do not delegate further. Report concise findings, evidence paths, commands and exit statuses, changed files, and unresolved limitations. Never claim checks that were not run.
 
 Task:
 {task}
-"""
-    (run / "task.txt").write_text(prompt)
-    activity = Activity(Path(os.environ.get("VIOLIN_WORKER_STATUS", str(run / "status.json"))),
-                        time.time() + args.timeout)
-    activity.write()
-    metadata = None
-    if args.backend == "qwen":
-        activity.event("metadata_check")
-        ok, metadata = metadata_preflight(run)
-        if not ok:
-            report = {"status": "metadata_unavailable", "backend": "qwen", "exit_code": None,
-                      "duration_seconds": round(time.monotonic() - activity.started, 2),
-                      "evidence": str(run), "phase": "failed", "metadata": metadata,
-                      "summary": "", "summary_truncated": False, "supervisor_review_required": True}
-            atomic_json(run / "report.json", report)
-            activity.event("failed")
-            print(json.dumps(report, ensure_ascii=False))
-            return 1
-        metadata_degraded = metadata.get("status") == "degraded"
-        qwen_binary = os.environ.get("VIOLIN_QWEN_BIN", str(Path.home() / "bin/violin-codex-qwen"))
-        smoke_ok, smoke_error = qwen_smoke(qwen_binary, args.timeout, run / "smoke.json")
-        if not smoke_ok:
-            report = {"status": "qwen_unhealthy", "backend": "qwen", "exit_code": None,
-                      "duration_seconds": round(time.monotonic() - activity.started, 2),
-                      "evidence": str(run), "phase": "failed", "metadata": metadata,
-                      "summary": "", "summary_truncated": False, "supervisor_review_required": True,
-                      "final_message_seen": False, "changed_files": [],
-                      "git_diff_check": {"before_status_exit": None, "after_status_exit": None,
-                                         "new_changed_files": []},
-                      "error_message": smoke_error, "smoke": str(run / "smoke.json")}
-            atomic_json(run / "report.json", report)
-            activity.event("failed")
-            print(json.dumps(report, ensure_ascii=False))
-            return 1
-    else:
-        metadata_degraded = False
-    baseline_git_code, baseline_git = git_state(cwd)
-    cmd = command(args.backend, args.mode, cwd, result, args.timeout, prompt)
-    status, code, proc, failure_reason = "failed", None, None, None
-    output_done, output_thread = threading.Event(), None
-    event_state = {"final_message_seen": False, "error_message": None}
-    with (run / "stdout.log").open("w") as out, (run / "stderr.log").open("w") as err:
+"""; (run/"task.txt").write_text(prompt); cmd=command(a.backend,a.mode,cwd,result,a.timeout,prompt); proc=None; done=threading.Event(); state={"text":[],"error":None,"terminal":False,"terminal_status":None,"usage":None}; status="failed"; code=None
+    state["metadata_degraded"] = False
+    with (run/"stdout.log").open("w") as out,(run/"stderr.log").open("w") as err:
         try:
-            activity.event("backend_starting")
-            proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                    stderr=err, start_new_session=True, text=True, bufsize=1)
-            activity.pid = proc.pid
-            activity.heartbeat()
-            atomic_json(run / "process.json", {"pid": proc.pid, "backend": args.backend})
-
+            activity.event("backend_starting"); proc=subprocess.Popen(cmd,cwd=cwd,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=err,start_new_session=True,text=True,bufsize=1); activity.pid=proc.pid; activity.heartbeat(); atomic_json(run/"process.json",{"pid":proc.pid,"backend":a.backend})
             def read_output():
                 try:
                     for line in proc.stdout:
-                        out.write(line)
-                        out.flush()
-                        try:
-                            event = json.loads(line)
+                        out.write(line); out.flush()
+                        try: event=json.loads(line)
                         except ValueError:
-                            if "metadata" in line.lower() and "fallback" in line.lower():
-                                activity.failure_reason = "metadata_degraded"
-                                activity.event("degraded")
+                            if "metadata" in line.lower() and "fallback" in line.lower(): state["metadata_degraded"] = True
                             continue
-                        event_type = event.get("type", "")
-                        item_type = event.get("item", {}).get("type") if isinstance(event.get("item"), dict) else ""
-                        event_name = f"{event_type} {item_type}"
-                        if event_type in ("turn.started", "response.created"):
-                            activity.event("turn_started")
-                        elif "reasoning" in event_name:
-                            activity.event("reasoning")
-                        elif "command_execution" in event_name and "completed" not in event_name:
-                            activity.event("command_started", event_type)
-                        elif "command_execution" in event_name and ("completed" in event_name or
-                                                                      event.get("status") == "completed"):
-                            activity.event("command_completed", event_type)
-                        if event_type == "item.completed" and item_type == "agent_message":
-                            event_state["final_message_seen"] = True
-                            message = event_text(event)
-                            if not result.exists() and message.strip():
-                                result.write_text(message)
-                        elif event_type == "item.completed" and item_type == "error":
-                            event_state["error_message"] = event_text(event) or str(event.get("error") or "provider returned an error")
-                            activity.failure_reason = "provider_error"
-                        elif event_type in ("turn.completed", "response.completed"):
-                            activity.event("completed")
-                        elif event_type in ("turn.failed", "error"):
-                            event_state["error_message"] = event_text(event) or str(event.get("error") or "provider returned an error")
-                            activity.failure_reason = "provider_error"
-                            activity.event("failed")
-                finally:
-                    output_done.set()
-
-            output_thread = threading.Thread(target=read_output, daemon=True)
-            output_thread.start()
-            activity.event("turn_started")
-            if proc.stdin is not None:
-                proc.stdin.write(prompt if args.backend == "qwen" else "")
-                proc.stdin.close()
+                        typ=event.get("type",""); item=event.get("item") if isinstance(event.get("item"),dict) else {}; ityp=item.get("type","")
+                        if typ in ("response.created","turn.started"): activity.event("turn_started")
+                        elif "command_execution" in typ and "completed" not in typ: activity.event("command_started",typ)
+                        elif "command_execution" in typ: activity.event("command_completed",typ)
+                        if typ=="response.output_text.delta": state["text"].append(event.get("delta", ""))
+                        if typ=="response.output_text.done" and event.get("text"): state["text"].append(event["text"])
+                        if typ=="item.completed" and ityp=="agent_message": state["text"].append(event_text(event))
+                        if typ=="item.completed" and ityp=="error": state["error"]=event_text(event) or str(event.get("error") or "provider returned an error")
+                        if typ in ("error","turn.failed"): state["error"]=event_text(event) or str(event.get("error") or "provider returned an error")
+                        if typ in ("response.completed","turn.completed"):
+                            state["terminal"]=True; response=event.get("response") if isinstance(event.get("response"),dict) else {}; state["terminal_status"]=response.get("status",event.get("status")); state["usage"]=event.get("usage"); state["error"]=state["error"] or event_text(response) or str(response.get("error") or event.get("error") or "") or None; incomplete=response.get("incomplete_details") or event.get("incomplete_details"); state["error"]=state["error"] or (str(incomplete) if incomplete else None); activity.event("completed" if not state["error"] else "failed")
+                finally: done.set()
+            threading.Thread(target=read_output,daemon=True).start(); activity.event("turn_started"); proc.stdin.write(prompt if a.backend=="qwen" else ""); proc.stdin.close()
             while proc.poll() is None:
-                now = time.monotonic()
-                if now - activity.last_event >= args.idle_timeout:
-                    status = "idle_timeout"
-                    activity.event("timeout")
-                    terminate_process(proc)
-                    break
-                if time.time() >= activity.deadline:
-                    status = "timeout"
-                    activity.event("timeout")
-                    terminate_process(proc)
-                    break
-                activity.heartbeat()
-                time.sleep(0.25)
-            proc.wait()
-            output_done.wait(timeout=5)
-            code = proc.returncode
-            if status == "failed" and activity.failure_reason != "provider_error":
-                status = "completed" if code == 0 else "failed"
-        except KeyboardInterrupt:
-            status = "interrupted"
-            activity.event("interrupted")
-            terminate_process(proc)
-            if proc is not None:
-                code = proc.returncode
-        except OSError as exc:
-            err.write(str(exc))
-            activity.event("failed")
-        finally:
-            if output_thread is not None:
-                output_done.wait(timeout=5)
-    usage = None
-    if args.backend == "agy" and status == "completed":
+                if time.monotonic()>=deadline: status="timeout"; activity.event("timeout"); terminate(proc); break
+                if time.monotonic()-activity.last_event>=a.idle_timeout: status="idle_timeout"; activity.event("timeout"); terminate(proc); break
+                activity.heartbeat(); time.sleep(.1)
+            proc.wait(); done.wait(5); code=proc.returncode
+            if status == "failed": status="completed" if code==0 else "failed"
+        except KeyboardInterrupt: status="interrupted"; activity.event("interrupted"); terminate(proc); code=proc.returncode if proc else None
+        except OSError as exc: status="failed"; err.write(str(exc)); activity.event("failed")
+    if a.backend=="agy" and status=="completed":
         try:
-            data = json.loads((run / "stdout.log").read_text())
-            if data.get("status") != "SUCCESS" or not isinstance(data.get("response"), str):
-                status = "failed"
-                failure_reason = "provider_error"
-                event_state["error_message"] = data.get("error") or "AGY returned a non-success payload"
-            else:
-                result.write_text(data["response"])
-                event_state["final_message_seen"] = bool(data["response"].strip())
-                usage = data.get("usage")
-        except (ValueError, TypeError):
-            status = "failed"
-            failure_reason = "provider_error"
-            event_state["error_message"] = "AGY returned invalid JSON"
-    if args.backend == "qwen":
-        for line in (run / "stdout.log").read_text().splitlines():
-            try:
-                event = json.loads(line)
-                if event.get("type") == "turn.completed":
-                    usage = event.get("usage")
-                if event.get("type") in ("turn.failed", "error") or (
-                        event.get("type") == "item.completed" and isinstance(event.get("item"), dict)
-                        and event["item"].get("type") == "error"):
-                    status = "failed"
-                    failure_reason = "provider_error"
-                    event_state["error_message"] = event_text(event) or str(event.get("error") or "provider returned an error")
-            except ValueError:
-                pass
-        if activity.failure_reason == "provider_error" and status == "completed":
-            status = "failed"
-            failure_reason = "provider_error"
-        if activity.failure_reason == "metadata_degraded":
-            metadata_degraded = True
-    summary = result.read_text() if result.exists() else ""
-    final_message_seen = event_state["final_message_seen"]
-    error_message = event_state["error_message"]
-    if args.backend == "qwen" and status == "completed" and not final_message_seen:
-        status = "empty_final_response"
-    after_git_code, after_git = git_state(cwd)
-    run_root = Path(os.environ.get("VIOLIN_WORKER_RUNS", str(Path.home() / ".local/state/violin-workers"))).resolve()
-    changed_files = changed_paths(baseline_git, after_git, cwd, run_root)
-    git_diff_check = {"before_status_exit": baseline_git_code, "after_status_exit": after_git_code,
-                      "new_changed_files": changed_files}
-    if args.mode == "implement" and status == "completed" and not changed_files:
-        status = "no_changes"
-    phase = json.loads(activity.path.read_text()).get("phase")
-    report = {"status": status, "backend": args.backend, "exit_code": code,
-              "duration_seconds": round(time.monotonic() - started, 2), "evidence": str(run),
-              "phase": phase, "metadata": metadata, "usage": usage,
-              "summary": summary[:args.summary_chars], "summary_truncated": len(summary) > args.summary_chars,
-              "supervisor_review_required": True, "final_message_seen": final_message_seen,
-              "changed_files": changed_files, "git_diff_check": git_diff_check}
-    if metadata_degraded:
-        report["status_detail"] = "metadata_degraded"
-    if error_message:
-        report["error_message"] = error_message
-    if failure_reason:
-        report["failure_reason"] = failure_reason
-    atomic_json(run / "report.json", report)
-    print(json.dumps(report, ensure_ascii=False))
-    return 0 if status == "completed" else 1
+            payload=json.loads((run/"stdout.log").read_text())
+            if payload.get("status")!="SUCCESS" or not isinstance(payload.get("response"),str): raise ValueError(payload.get("error") or "AGY returned a non-success payload")
+            result.write_text(payload["response"]); state["text"]=[payload["response"]]; state["usage"]=payload.get("usage")
+        except (ValueError,TypeError,OSError) as exc: status="failed"; state["error"]=str(exc)
+    message=result.read_text() if result.exists() else ""; accumulated="".join(state["text"])
+    if not message and accumulated.strip(): result.write_text(accumulated); message=accumulated
+    final=bool(message.strip())
+    if state["error"] and (status == "completed" or (a.backend == "qwen" and status == "failed")): status="provider_error"
+    if a.backend=="qwen" and status=="completed" and (not state["terminal"] or state["terminal_status"] in ("failed","incomplete") or not final): status="empty_final_response" if not final else "provider_error"
+    after_code,after=git_state(cwd); changed=changed_paths(baseline,after,cwd,root.resolve()); diff={"before_status_exit":baseline_code,"after_status_exit":after_code,"new_changed_files":changed}
+    if a.mode=="implement" and status=="completed" and not changed: status="no_changes"
+    report=make_report(status,a.backend,code,run,started,activity,metadata,metadata_status,smoke_status,final,changed,diff,state["error"],state["usage"],message,a.summary_chars)
+    if state.get("metadata_degraded"): report["status_detail"] = "metadata_degraded"
+    atomic_json(run/"report.json",report); print(json.dumps(report,ensure_ascii=False)); return 0 if status=="completed" else 1
 
-
-if __name__ == "__main__":
-    def terminate(signum, frame):
-        raise KeyboardInterrupt
-    signal.signal(signal.SIGTERM, terminate)
-    sys.exit(main())
+if __name__=="__main__":
+    signal.signal(signal.SIGTERM,lambda *_: (_ for _ in ()).throw(KeyboardInterrupt())); sys.exit(main())

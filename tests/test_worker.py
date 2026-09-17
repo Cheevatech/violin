@@ -47,6 +47,24 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':42}}))
         self.assertEqual(report["usage"]["input_tokens"], 42)
         self.assertEqual(report["summary"], "evidence verified")
 
+    def test_qwen_accumulates_response_deltas(self):
+        code, report = self.run_worker("qwen", """import json
+print(json.dumps({'type':'response.output_text.delta','delta':'hello '}))
+print(json.dumps({'type':'response.output_text.delta','delta':'world'}))
+print(json.dumps({'type':'response.completed','response':{'status':'completed'}}))
+""")
+        self.assertEqual(code, 0)
+        self.assertEqual(report["summary"], "hello world")
+
+    def test_qwen_response_completed_failure_is_provider_error(self):
+        code, report = self.run_worker("qwen", """import json
+print(json.dumps({'type':'response.output_text.delta','delta':'partial'}))
+print(json.dumps({'type':'response.completed','response':{'status':'failed','error':{'message':'upstream failed'}}}))
+""")
+        self.assertEqual(code, 1)
+        self.assertEqual(report["status"], "provider_error")
+        self.assertIn("upstream failed", report["error_message"])
+
     def test_agy_exact_model_and_result(self):
         code, report = self.run_worker("agy", """import sys,json
 assert sys.argv[sys.argv.index('--model')+1] == 'gemini-3.8-flash-medium'

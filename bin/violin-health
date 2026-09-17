@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""Canonical Qwen metadata and runtime preflight.
+
+Exit 0 means usable (metadata may be degraded), 78 means metadata unavailable,
+and 79 means the configured runtime smoke failed.
+"""
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+METADATA = Path(__file__).with_name("violin-qwen-metadata")
+
+
+def main():
+    binary = os.environ.get("VIOLIN_QWEN_BIN", str(Path.home() / "bin/violin-codex-qwen"))
+    try:
+        metadata_proc = subprocess.run([str(METADATA)], capture_output=True, text=True,
+                                       timeout=float(os.environ.get("VIOLIN_METADATA_TIMEOUT", "10")))
+        metadata = json.loads(metadata_proc.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        metadata_proc = None
+        metadata = {"status": "unavailable", "error": f"metadata_check: {type(exc).__name__}"}
+    result = {"model": "qwen3.8-27b", "provider": "violin_lan", "metadata": metadata,
+              "metadata_status": metadata.get("status", "unavailable")}
+    if metadata_proc is None or metadata_proc.returncode != 0:
+        result.update(status="metadata_unavailable", smoke_status="not_run")
+        print(json.dumps(result, ensure_ascii=False))
+        return 78
+    try:
+        smoke = subprocess.run([binary, "smoke"], capture_output=True, text=True,
+                               timeout=float(os.environ.get("VIOLIN_SMOKE_TIMEOUT", "60")))
+        smoke_evidence = {"command": [binary, "smoke"], "exit_code": smoke.returncode,
+                          "stdout": smoke.stdout, "stderr": smoke.stderr}
+    except subprocess.TimeoutExpired as exc:
+        smoke_evidence = {"command": [binary, "smoke"], "exit_code": None,
+                          "stdout": exc.stdout or "", "stderr": exc.stderr or "",
+                          "error": "smoke_timeout"}
+        smoke = None
+    except OSError as exc:
+        smoke_evidence = {"command": [binary, "smoke"], "exit_code": None,
+                          "error": f"smoke_launch_error: {type(exc).__name__}"}
+        smoke = None
+    result["smoke"] = smoke_evidence
+    result["smoke_status"] = "passed" if smoke and smoke.returncode == 0 else "failed"
+    text = (smoke_evidence.get("stdout") or "") + (smoke_evidence.get("stderr") or "")
+    markers = ("QWEN_SMOKE_OK", "qwen3.8-27b", "violin_lan")
+    if result["smoke_status"] != "passed" or any(marker not in text for marker in markers):
+        result.update(status="qwen_unhealthy", error="runtime smoke did not prove model/provider/final response")
+        print(json.dumps(result, ensure_ascii=False))
+        return 79
+    result.update(status="ready", final_response_seen=True)
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

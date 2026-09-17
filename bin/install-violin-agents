@@ -49,16 +49,18 @@ final answer. Keep trivial work local when delegation would cost more overhead.
 
 Send only a bounded task, absolute cwd, necessary context/source paths, and
 acceptance criteria. Default to inspect; select implement only for authorized
-edits. Qwen is the default for file/code work; AGY is useful for independent
-analysis, synthesis, and cross-checking. Choose either for other tasks based on
-required tools. Workers do not inherit this chat or its connectors; supply needed
-context explicitly, and keep unavailable capabilities with the supervisor.
+edits. Use backend auto by default: prefer Qwen for file/code work and fall
+back to AGY only when the Qwen capacity quota is full. Use strict qwen or agy
+when the task requires a specific backend. Workers do not inherit this chat or
+its connectors; supply needed context explicitly, and keep unavailable
+capabilities with the supervisor.
 
 Use at most three independent workers; do not overlap write scopes. Poll the same
 agent id until terminal; observation timeouts are not failures. Read full evidence
 when summaries are truncated. Validate changed files and relevant checks yourself;
-a completed process is not acceptance. Do not silently retry failed work or fall
-back to paid OpenAI children. Reassess the failure and give a bounded correction.
+a completed process is not acceptance. Report the selected backend and any
+capacity fallback. Do not silently retry failed work or fall back to paid
+OpenAI children. Reassess the failure and give a bounded correction.
 
 Before declaring Qwen unavailable, run
 `/Users/film/Documents/looping-engineer/bin/violin-qwen-metadata`. The official
@@ -77,7 +79,8 @@ claim native routing. Never copy the entire parent conversation into a worker.
     new_guidance = replace_block(old_guidance, policy)
     # Validate every destination before changing any global file.
     links = [(home / 'bin' / name, ROOT / 'bin' / name)
-             for name in ['violin-worker', 'violin-agent-server']]
+             for name in ['violin-worker', 'violin-agent-server', 'violin-health',
+                           'violin-codex-qwen', 'qwen-mode', 'qwen-verify-gate']]
     for dest, source in links:
         if dest.exists() and (not dest.is_symlink() or dest.resolve() != source):
             raise ValueError(f"Unmanaged executable exists: {dest}")
@@ -93,6 +96,13 @@ claim native routing. Never copy the entire parent conversation into a worker.
         dest.parent.mkdir(parents=True, exist_ok=True)
         if not dest.exists():
             dest.symlink_to(source)
+    schema_dir = home / '.local/share/violin-agents'
+    schema_dir.mkdir(parents=True, exist_ok=True)
+    schema_link = schema_dir / 'worker-report.schema.json'
+    if schema_link.exists() and (not schema_link.is_symlink() or schema_link.resolve() != ROOT / 'schemas/worker-report.schema.json'):
+        raise ValueError(f'Unmanaged schema exists: {schema_link}')
+    if not schema_link.exists():
+        schema_link.symlink_to(ROOT / 'schemas/worker-report.schema.json')
     print(json.dumps({'installed': str(config), 'guidance': str(guidance), 'backup': str(backup)}))
 
 
