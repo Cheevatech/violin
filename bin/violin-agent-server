@@ -9,12 +9,11 @@ import sys
 import tempfile
 import time
 import uuid
-import fcntl
+from violin_scheduler import Scheduler, load_config
 
 RUNNER = Path(__file__).resolve().with_name("violin-worker")
 HEALTH = Path(__file__).resolve().with_name("violin-health")
 JOBS = {}
-DEFAULT_LIMITS = {"agy": 10, "qwen": 1, "claude": 2}
 # MCP tool_timeout_sec is 60s. Keep synchronous auto preflight below it so
 # spawn_agent can always return a lease/agent_id or an explicit fallback.
 HEALTH_TIMEOUT = 45
@@ -76,85 +75,11 @@ def public_response(report, requested_backend=None, selected_backend=None,
     return result
 
 
-def limits():
-    values = {}
-    for backend, default in DEFAULT_LIMITS.items():
-        try:
-            value = int(os.environ.get(f"VIOLIN_{backend.upper()}_MAX_CONCURRENCY", default))
-        except ValueError:
-            value = default
-        values[backend] = max(0, value)
-    return values
-
-
-def lease_paths(root):
-    directory = root / "leases"
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    return directory, directory / ".lock"
-
-
-def process_alive(pid):
-    if not isinstance(pid, int) or pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except (ProcessLookupError, PermissionError):
-        return False
-
-
-def reserve(root, requested):
-    directory, lock_path = lease_paths(root)
-    quota = limits()
-    with lock_path.open("a+") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        active = []
-        for path in directory.glob("*.json"):
-            try:
-                lease = json.loads(path.read_text())
-            except (ValueError, OSError):
-                path.unlink(missing_ok=True)
-                continue
-            if not process_alive(lease.get("server_pid")) or (
-                lease.get("worker_pid") is not None and not process_alive(lease.get("worker_pid"))
-            ):
-                path.unlink(missing_ok=True)
-                continue
-            active.append((path, lease))
-        order = ["agy", "qwen", "claude"] if requested == "auto" else [requested]
-        selected = next((backend for backend in order
-                         if sum(x.get("backend") == backend for _, x in active) < quota[backend]), None)
-        if selected is None:
-            fcntl.flock(lock, fcntl.LOCK_UN)
-            return None, {backend: sum(x.get("backend") == backend for _, x in active)
-                           for backend in DEFAULT_LIMITS}, quota
-        lease_path = directory / f"{uuid.uuid4()}.json"
-        lease_path.write_text(json.dumps({"backend": selected, "server_pid": os.getpid(),
-                                          "worker_pid": None, "created_at": time.time()}))
-        fcntl.flock(lock, fcntl.LOCK_UN)
-    return lease_path, {backend: sum(x.get("backend") == backend for _, x in active)
-                        for backend in DEFAULT_LIMITS}, quota
-
-
-def update_lease(path, worker_pid):
-    if path is None:
-        return
-    try:
-        value = json.loads(path.read_text())
-        value["worker_pid"] = worker_pid
-        path.write_text(json.dumps(value))
-    except (ValueError, OSError):
-        pass
-
-
-def release_lease(path):
-    if path is not None:
-        path.unlink(missing_ok=True)
-
-
-def qwen_health():
+def qwen_health(config):
     try:
         health_env = dict(os.environ, VIOLIN_METADATA_TIMEOUT="8", VIOLIN_SMOKE_TIMEOUT="35")
+        if config["commands"].get("qwen"):
+            health_env["VIOLIN_QWEN_BIN"] = config["commands"]["qwen"]
         process = subprocess.run([str(HEALTH)], capture_output=True, text=True,
                                  timeout=HEALTH_TIMEOUT, env=health_env)
         return process.returncode == 0, json.loads(process.stdout)
@@ -173,7 +98,7 @@ def snapshot(job):
     except (ValueError, OSError):
         pass
     if code is not None:
-        release_lease(job.get("lease"))
+        Scheduler.release_lease(job.get("lease"))
         try:
             report = json.loads(job["output"].read_text())
             result.update(report)
@@ -202,25 +127,29 @@ def dispatch(name, args):
         if type(idle_timeout) is not int or not 1 <= idle_timeout <= 3600:
             raise ValueError("idle_timeout_seconds must be between 1 and 3600")
         root = Path(os.environ.get("VIOLIN_WORKER_RUNS", str(Path.home() / ".local/state/violin-workers")))
-        root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        health_failed, health_evidence = False, None
-        if requested_backend == "auto":
-            # AGY is preferred. Only when it is full do we perform Qwen's
-            # health preflight and then consider Qwen before Claude.
-            lease, counts, quota = reserve(root, "agy")
-            if lease is None:
-                healthy, health_evidence = qwen_health()
-                health_failed = not healthy
-                lease, counts, quota = (reserve(root, "qwen") if healthy
-                                        else (None, counts, quota))
-            if lease is None:
-                lease, counts, quota = reserve(root, "claude")
-        else:
-            lease, counts, quota = reserve(root, requested_backend)
+        config = load_config()
+        scheduler = Scheduler(root, config, session_id=str(os.getpid()))
+        health_failed, health_evidence, unavailable = False, None, set()
+        lease = counts = quota = reason = None
+        while lease is None:
+            lease, counts, quota, reason = scheduler.reserve(requested_backend, unavailable)
+            if lease is None or requested_backend != "auto":
+                break
+            candidate = json.loads(lease.read_text())["backend"]
+            if candidate == "qwen":
+                healthy, health_evidence = qwen_health(config)
+                if not healthy:
+                    health_failed = True
+                    unavailable.add(candidate)
+                    scheduler.release_lease(lease)
+                    lease = None
+                    continue
+            break
         if lease is None:
             raise ValueError(json.dumps({"error": "worker capacity is full",
                                          "requested_backend": requested_backend,
-                                         "capacity_snapshot": counts, "quotas": quota}))
+                                         "capacity_snapshot": counts or {}, "quotas": quota or {},
+                                         "reason": reason or "backend_capacity_full"}))
         backend = json.loads(lease.read_text())["backend"]
         directory = Path(tempfile.mkdtemp(prefix="agent-", dir=root))
         taskfile = directory / "task.txt"
@@ -232,6 +161,8 @@ def dispatch(name, args):
                                            "timeout_deadline": None, "command_type": None,
                                            "evidence": str(directory)}))
         worker_env = dict(os.environ, VIOLIN_WORKER_STATUS=str(status_path))
+        for name, command in config["commands"].items():
+            worker_env[f"VIOLIN_{name.upper()}_BIN"] = command
         try:
             with output.open("w") as out, (directory / "server-stderr.log").open("w") as err:
                 proc = subprocess.Popen([str(RUNNER), backend, "--mode", mode, "-C", str(cwd),
@@ -240,25 +171,22 @@ def dispatch(name, args):
                                         stdin=subprocess.DEVNULL, stdout=out, stderr=err, env=worker_env,
                                         start_new_session=True)
         except OSError:
-            release_lease(lease)
+            scheduler.release_lease(lease)
             raise
-        update_lease(lease, proc.pid)
+        scheduler.update_lease(lease, proc.pid)
         agent_id = str(uuid.uuid4())
         job = {"id": agent_id, "backend": backend, "process": proc, "output": output,
                "status": directory / "status.json", "lease": lease,
                "requested_backend": requested_backend, "capacity_snapshot": counts,
-               "quota": quota, "fallback_reason": ("qwen_health_failed" if health_failed else
-                   "qwen_capacity_full" if backend == "claude" else "agy_capacity_full")}
+               "quota": quota, "fallback_reason": ("qwen_health_failed" if health_failed else reason)}
         if health_evidence is not None:
             job["health_evidence"] = health_evidence
         JOBS[agent_id] = job
         result = snapshot(job)
         result.update({"requested_backend": requested_backend, "selected_backend": backend,
                        "capacity_snapshot": counts, "quotas": quota})
-        if requested_backend == "auto" and backend != "agy":
-            result["fallback_reason"] = ("qwen_health_failed" if health_failed else
-                                           "qwen_capacity_full" if backend == "claude" else
-                                           "agy_capacity_full")
+        if requested_backend == "auto" and (reason or health_failed):
+            result["fallback_reason"] = ("qwen_health_failed" if health_failed else reason)
             if health_failed:
                 result["health_evidence"] = health_evidence
         return public_response(result, requested_backend, backend,
@@ -282,8 +210,8 @@ def dispatch(name, args):
         result.update({"requested_backend": job["requested_backend"],
                        "selected_backend": job["backend"],
                        "capacity_snapshot": job["capacity_snapshot"], "quotas": job["quota"]})
-        if job["requested_backend"] == "auto" and job["backend"] != "agy":
-            result["fallback_reason"] = job.get("fallback_reason", "agy_capacity_full")
+        if job["requested_backend"] == "auto" and job.get("fallback_reason"):
+            result["fallback_reason"] = job["fallback_reason"]
             if job.get("health_evidence") is not None:
                 result["health_evidence"] = job["health_evidence"]
         return public_response(result, job["requested_backend"], job["backend"],

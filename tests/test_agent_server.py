@@ -83,15 +83,12 @@ print(json.dumps({"type": "result", "subtype": "success", "result": "claude fixt
         self.assertEqual(result["selected_backend"], "agy")
         self.assertTrue(result["supervisor_review_required"])
 
-    def test_auto_falls_back_to_qwen_when_agy_is_full(self):
-        slow = [self.tool("spawn_agent", {"cwd":str(self.root),"task":"SLOW_TEST"}) for _ in range(10)]
-        self.assertTrue(all(job["selected_backend"] == "agy" for job in slow))
-        fallback = self.tool("spawn_agent", {"cwd":str(self.root),"task":"Read fixture"})
-        self.assertEqual(fallback["selected_backend"], "qwen")
-        self.assertEqual(fallback["fallback_reason"], "agy_capacity_full")
-        result = self.tool("wait_agent", {"agent_id":fallback["agent_id"],"wait_seconds":5})
-        self.assertEqual(result["summary"], "fixture result")
-        for job in slow:
+    def test_auto_round_robin_skips_full_backends(self):
+        jobs = [self.tool("spawn_agent", {"cwd":str(self.root),"task":"SLOW_TEST"}) for _ in range(5)]
+        self.assertEqual([job["selected_backend"] for job in jobs],
+                         ["agy", "qwen", "claude", "agy", "claude"])
+        self.assertEqual(jobs[4]["fallback_reason"], "round_robin_skip")
+        for job in jobs:
             self.tool("interrupt_agent", {"agent_id":job["agent_id"]})
 
     def test_interrupt_running_worker(self):

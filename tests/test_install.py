@@ -26,6 +26,7 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(tomllib.loads(first[0])['model'], 'existing-model')
             self.assertTrue(first[1].startswith('Existing guidance\n'))
             self.assertTrue((home/'bin/violin-worker').is_symlink())
+            self.assertTrue((home/'bin/violin-agent').is_symlink())
             self.assertTrue((home/'bin/violin-claude').is_symlink())
 
     def test_unmanaged_server_is_not_overwritten(self):

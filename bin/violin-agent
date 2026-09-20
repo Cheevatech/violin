@@ -1,0 +1,232 @@
+#!/usr/bin/env python3
+"""CLI facade for the shared external-agent scheduler."""
+import argparse
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+from violin_scheduler import BACKENDS, Scheduler, config_view, load_config
+
+
+ROOT = Path(__file__).resolve().parent
+RUNNER = ROOT / "violin-worker"
+
+
+def run_root():
+    return Path(os.environ.get("VIOLIN_WORKER_RUNS", str(Path.home() / ".local/state/violin-workers"))).expanduser()
+
+
+def jobs_dir(root):
+    directory = root / "cli-jobs"
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return directory
+
+
+def write_job(path, value):
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2))
+
+
+def read_job(path):
+    return json.loads(path.read_text())
+
+
+def cli_config(args):
+    config = load_config(args.config)
+    if getattr(args, "order", None):
+        config["order"] = [x.strip() for x in args.order.split(",") if x.strip() in BACKENDS]
+    if getattr(args, "session_max_concurrency", None) is not None:
+        config["session_max_concurrency"] = args.session_max_concurrency
+    if getattr(args, "machine_max_concurrency", None) is not None:
+        config["machine_max_concurrency"] = args.machine_max_concurrency
+    for backend in BACKENDS:
+        value = getattr(args, f"{backend}_max_concurrency", None)
+        if value is not None:
+            config["limits"][backend] = value
+    return config
+
+
+def qwen_health(config):
+    env = dict(os.environ, VIOLIN_METADATA_TIMEOUT="8", VIOLIN_SMOKE_TIMEOUT="35")
+    if config["commands"].get("qwen"):
+        env["VIOLIN_QWEN_BIN"] = config["commands"]["qwen"]
+    try:
+        result = subprocess.run([str(ROOT / "violin-health")], capture_output=True,
+                                text=True, timeout=45, env=env)
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def spawn(args):
+    config = cli_config(args)
+    root = run_root()
+    session_id = args.session_id or os.environ.get("VIOLIN_SESSION_ID") or f"cli:{os.getppid()}"
+    scheduler = Scheduler(root, config, session_id=session_id)
+    unavailable = set()
+    lease = counts = quota = reason = None
+    health_evidence = None
+    while lease is None:
+        lease, counts, quota, reason = scheduler.reserve(args.backend, unavailable)
+        if lease is None or args.backend != "auto":
+            break
+        backend = json.loads(lease.read_text())["backend"]
+        if backend == "qwen" and not qwen_health(config):
+            unavailable.add(backend)
+            scheduler.release_lease(lease)
+            lease = None
+            continue
+        break
+    if lease is None:
+        raise SystemExit(json.dumps({"error": reason or "capacity_full", "counts": counts or {},
+                                     "quotas": quota or {}}, ensure_ascii=False))
+    backend = json.loads(lease.read_text())["backend"]
+    directory = Path(tempfile.mkdtemp(prefix="cli-agent-", dir=root))
+    taskfile = directory / "task.txt"
+    taskfile.write_text(args.task if args.task is not None else Path(args.task_file).read_text())
+    output = directory / "output.json"
+    status = directory / "status.json"
+    status.write_text(json.dumps({"phase": "starting", "evidence": str(directory),
+                                  "last_event_at": time.time(), "elapsed_seconds": 0}))
+    env = dict(os.environ, VIOLIN_WORKER_STATUS=str(status))
+    for name, command in config["commands"].items():
+        env[f"VIOLIN_{name.upper()}_BIN"] = command
+    proc = subprocess.Popen([str(RUNNER), backend, "--mode", args.mode, "-C", str(Path(args.cwd).resolve()),
+                             "--task-file", str(taskfile), "--timeout", str(args.timeout),
+                             "--idle-timeout", str(args.idle_timeout)], stdin=subprocess.DEVNULL,
+                            stdout=output.open("w"), stderr=(directory / "stderr.log").open("w"),
+                            env=env, start_new_session=True)
+    scheduler.update_lease(lease, proc.pid)
+    agent_id = str(uuid.uuid4())
+    record = jobs_dir(root) / f"{agent_id}.json"
+    write_job(record, {"agent_id": agent_id, "backend": backend, "pid": proc.pid,
+                       "lease": str(lease), "output": str(output), "evidence": str(directory),
+                       "record": str(record), "requested_backend": args.backend,
+                       "created_at": time.time()})
+    if args.background:
+        print(json.dumps({"agent_id": agent_id, "status": "running", "selected_backend": backend,
+                          "requested_backend": args.backend, "evidence": str(directory)}, ensure_ascii=False))
+        return 0
+    proc.wait()
+    return finish(record)
+
+
+def finish(record):
+    job = read_job(record)
+    output = Path(job["output"])
+    try:
+        report = json.loads(output.read_text())
+    except (OSError, ValueError):
+        report = {"status": "failed", "error_message": "Worker ended without a valid report",
+                  "evidence": job["evidence"]}
+    report.update({"agent_id": job["agent_id"], "requested_backend": job["requested_backend"],
+                   "selected_backend": job["backend"]})
+    Scheduler.release_lease(job.get("lease"))
+    if report.get("status") != "running":
+        record.unlink(missing_ok=True)
+    print(json.dumps(report, ensure_ascii=False))
+    return 0 if report.get("status") == "completed" else 1
+
+
+def find_job(root, agent_id):
+    path = jobs_dir(root) / f"{agent_id}.json"
+    if not path.exists():
+        raise SystemExit(f"Unknown agent_id: {agent_id}")
+    return path
+
+
+def wait_job(args):
+    path = find_job(run_root(), args.agent_id)
+    job = read_job(path)
+    deadline = time.monotonic() + args.wait_seconds
+    while time.monotonic() < deadline and process_alive(job["pid"]):
+        time.sleep(0.1)
+    if process_alive(job["pid"]):
+        print(json.dumps({"agent_id": args.agent_id, "status": "running",
+                          "selected_backend": job["backend"], "evidence": job["evidence"]}))
+        return 0
+    return finish(path)
+
+
+def process_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (ProcessLookupError, PermissionError, ValueError):
+        return False
+
+
+def list_jobs(_args):
+    values = []
+    for path in jobs_dir(run_root()).glob("*.json"):
+        try:
+            job = read_job(path)
+        except (OSError, ValueError):
+            continue
+        values.append({"agent_id": job["agent_id"], "status": "running" if process_alive(job["pid"]) else "completed",
+                       "requested_backend": job["requested_backend"], "selected_backend": job["backend"],
+                       "evidence": job["evidence"]})
+    print(json.dumps(values, ensure_ascii=False))
+    return 0
+
+
+def interrupt_job(args):
+    path = find_job(run_root(), args.agent_id)
+    job = read_job(path)
+    if process_alive(job["pid"]):
+        os.killpg(int(job["pid"]), signal.SIGINT)
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and process_alive(job["pid"]):
+            time.sleep(0.1)
+    return finish(path)
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="violin-agent")
+    parser.add_argument("--config")
+    parser.add_argument("--session-id", help="stable id for sharing the per-session limit across CLI calls")
+    parser.add_argument("--order", help="comma-separated backend order override")
+    parser.add_argument("--session-max-concurrency", type=int)
+    parser.add_argument("--machine-max-concurrency", type=int)
+    for backend in BACKENDS:
+        parser.add_argument(f"--{backend}-max-concurrency", type=int)
+    sub = parser.add_subparsers(dest="command", required=True)
+    run = sub.add_parser("run")
+    run.add_argument("--backend", choices=["auto", *BACKENDS], default="auto")
+    run.add_argument("-C", "--cwd", default=".")
+    source = run.add_mutually_exclusive_group(required=True)
+    source.add_argument("--task")
+    source.add_argument("--task-file")
+    run.add_argument("--mode", choices=["inspect", "implement"], default="inspect")
+    run.add_argument("--timeout", type=int, default=900)
+    run.add_argument("--idle-timeout", type=int, default=300)
+    run.add_argument("--background", action="store_true")
+    sub.add_parser("list")
+    wait = sub.add_parser("wait")
+    wait.add_argument("agent_id")
+    wait.add_argument("--wait-seconds", type=int, default=50)
+    interrupt = sub.add_parser("interrupt")
+    interrupt.add_argument("agent_id")
+    config = sub.add_parser("config")
+    config.add_argument("action", choices=["show", "validate"])
+    args = parser.parse_args()
+    if args.command == "config":
+        value = cli_config(args)
+        print(json.dumps(config_view(value), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "run":
+        return spawn(args)
+    if args.command == "list":
+        return list_jobs(args)
+    if args.command == "wait":
+        return wait_job(args)
+    return interrupt_job(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

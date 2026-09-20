@@ -49,8 +49,8 @@ final answer. Keep trivial work local when delegation would cost more overhead.
 
 Send only a bounded task, absolute cwd, necessary context/source paths, and
 acceptance criteria. Default to inspect; select implement only for authorized
-edits. Use backend auto by default: prefer AGY, then Qwen, then Claude according to
-capacity and Qwen health. Use strict qwen, agy, or claude
+edits. Use backend auto by default: use the configured global round-robin order
+(AGY, Qwen, Claude by default), skipping full backends. Use strict qwen, agy, or claude
 when the task requires a specific backend. Workers do not inherit this chat or
 its connectors; supply needed context explicitly, and keep unavailable
 capabilities with the supervisor.
@@ -70,8 +70,9 @@ effective `violin_lan` Responses configuration is valid. Accept the checker's
 because the cache lacks the custom model entry.
 
 If this MCP is unavailable in an existing session, use
-`{home}/bin/violin-worker qwen|agy -C /absolute/workspace --task-file /path/task`
-and retain the execution session handle. Native collaboration.spawn_agent is not
+`{home}/bin/violin-agent run --backend auto -C /absolute/workspace --task-file /path/task`
+or the low-level `{home}/bin/violin-worker qwen|agy|claude` command and retain
+the execution session handle. Native collaboration.spawn_agent is not
 intercepted: Codex 0.153.2 ignores provider overrides in agent role files. Do not
 claim native routing. Never copy the entire parent conversation into a worker.
 {END}'''
@@ -79,7 +80,7 @@ claim native routing. Never copy the entire parent conversation into a worker.
     new_guidance = replace_block(old_guidance, policy)
     # Validate every destination before changing any global file.
     links = [(home / 'bin' / name, ROOT / 'bin' / name)
-             for name in ['violin-worker', 'violin-agent-server', 'violin-health',
+             for name in ['violin-worker', 'violin-agent', 'violin_scheduler.py', 'violin-agent-server', 'violin-health',
                            'violin-codex-qwen', 'violin-claude', 'qwen-mode', 'qwen-verify-gate']]
     for dest, source in links:
         if dest.exists() and (not dest.is_symlink() or dest.resolve() != source):

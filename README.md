@@ -17,8 +17,11 @@ printf '%s' 'Read README.md and summarize the commands with source paths.' |
 Inspection is the default. Qwen uses a read-only sandbox; AGY uses plan mode
 with its terminal sandbox (these are different enforcement mechanisms).
 Implementation uses Qwen workspace-write, AGY accept-edits with sandbox, or
-Claude Code `acceptEdits`. The MCP server's `auto` order is AGY (10), Qwen (1),
-then Claude Code (2); Qwen health is checked only after AGY capacity is full.
+Claude Code `acceptEdits`. The MCP server and `violin-agent` CLI share a
+configurable global round-robin scheduler. Defaults are AGY (10), Qwen (1),
+then Claude Code (2), with a 10-job per-session limit and a 13-job
+machine-wide limit. Full backends are skipped instead of filling the first
+backend before falling back.
 The runner does not bypass permissions. Run independent commands concurrently
 through the supervisor's execution tool; retain its session handles and poll
 the same handles to completion. Avoid overlapping writers.
@@ -31,8 +34,22 @@ the task. Nonzero exits, missing results, backend errors, and timeouts fail the
 run. The report follows `schemas/worker-report.schema.json`. No automatic
 retry occurs, and a partial Qwen implementation is never retried on AGY.
 
-`VIOLIN_QWEN_BIN`, `VIOLIN_AGY_BIN`, `VIOLIN_CLAUDE_BIN`, and `VIOLIN_WORKER_RUNS` override executable
-and evidence locations. Default timeout is 900 seconds; `--timeout` changes it.
+`~/.config/violin-agents/config.toml` configures scheduler order, session and
+machine limits, backend limits, and executable paths. `VIOLIN_CONFIG`, the
+`VIOLIN_*_MAX_CONCURRENCY` variables, `VIOLIN_BACKEND_ORDER`, and backend bin
+variables override the file. The CLI facade supports `run`, `list`, `wait`,
+`interrupt`, and `config show|validate`:
+
+```bash
+violin-agent run --backend auto -C /absolute/workspace --task-file /path/task
+violin-agent config show
+```
+
+Use `--session-id NAME` or `VIOLIN_SESSION_ID` when separate CLI invocations
+should share one per-session limit.
+
+`VIOLIN_WORKER_RUNS` overrides the shared lease/evidence location. Default
+timeout is 900 seconds; `--timeout` changes it.
 Qwen preflight is shared by `bin/violin-health` and `bin/violin-worker`. It
 reports metadata as `healthy`, `degraded`, or `unavailable`, then runs a real
 runtime smoke that proves the final response contains the pinned model and
