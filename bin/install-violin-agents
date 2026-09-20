@@ -63,7 +63,7 @@ capacity fallback. Do not silently retry failed work or fall back to paid
 OpenAI children. Reassess the failure and give a bounded correction.
 
 Before declaring Qwen unavailable, run
-`/Users/film/Documents/looping-engineer/bin/violin-qwen-metadata`. The official
+`{home}/bin/violin-qwen-metadata`. The official
 Codex model cache may omit custom `qwen3.8-27b`; that is expected when the
 effective `violin_lan` Responses configuration is valid. Accept the checker's
 `codex_debug_models` or `launcher_config` source and do not reject Qwen solely
