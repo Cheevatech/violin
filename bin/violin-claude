@@ -1,0 +1,4 @@
+#!/bin/sh
+# Source-controlled launcher for the authenticated Claude Code CLI.
+# This is intentionally separate from violin-claude-qwen, which routes to Qwen.
+exec claude "$@"

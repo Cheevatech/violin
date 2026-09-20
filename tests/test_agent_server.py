@@ -32,7 +32,8 @@ print(json.dumps({'type':'turn.completed'}))
         fake.chmod(0o700)
         fake_agy = self.root / "fake-agy"
         fake_agy.write_text("""#!/usr/bin/env python3
-import json
+import json,sys,time
+if 'SLOW_TEST' in sys.argv[-1]: time.sleep(30)
 print(json.dumps({"status": "SUCCESS", "response": "agy fixture result"}))
 """)
         fake_agy.chmod(0o700)
@@ -40,7 +41,7 @@ print(json.dumps({"status": "SUCCESS", "response": "agy fixture result"}))
             stderr=subprocess.PIPE, text=True,
             env=dict(os.environ, VIOLIN_QWEN_BIN=str(fake), VIOLIN_WORKER_RUNS=str(self.root/"runs"),
                      VIOLIN_AGY_BIN=str(fake_agy), VIOLIN_CODEX_MODELS_CACHE=str(cache),
-                     VIOLIN_QWEN_MAX_CONCURRENCY="1", VIOLIN_AGY_MAX_CONCURRENCY="2"))
+                     VIOLIN_QWEN_MAX_CONCURRENCY="1", VIOLIN_AGY_MAX_CONCURRENCY="10"))
 
     def tearDown(self):
         self.proc.stdin.close()
@@ -66,20 +67,21 @@ print(json.dumps({"status": "SUCCESS", "response": "agy fixture result"}))
         job=self.tool("spawn_agent", {"cwd":str(self.root),"task":"Read fixture"})
         result=self.tool("wait_agent", {"agent_id":job["agent_id"],"wait_seconds":5})
         self.assertEqual(result["status"],"completed")
-        self.assertEqual(result["summary"],"fixture result")
+        self.assertEqual(result["summary"],"agy fixture result")
         self.assertEqual(result["requested_backend"], "auto")
-        self.assertEqual(result["selected_backend"], "qwen")
+        self.assertEqual(result["selected_backend"], "agy")
         self.assertTrue(result["supervisor_review_required"])
 
-    def test_auto_falls_back_to_agy_when_qwen_is_full(self):
-        slow = self.tool("spawn_agent", {"cwd":str(self.root),"task":"SLOW_TEST"})
-        self.assertEqual(slow["selected_backend"], "qwen")
+    def test_auto_falls_back_to_qwen_when_agy_is_full(self):
+        slow = [self.tool("spawn_agent", {"cwd":str(self.root),"task":"SLOW_TEST"}) for _ in range(10)]
+        self.assertTrue(all(job["selected_backend"] == "agy" for job in slow))
         fallback = self.tool("spawn_agent", {"cwd":str(self.root),"task":"Read fixture"})
-        self.assertEqual(fallback["selected_backend"], "agy")
-        self.assertEqual(fallback["fallback_reason"], "qwen_capacity_full")
+        self.assertEqual(fallback["selected_backend"], "qwen")
+        self.assertEqual(fallback["fallback_reason"], "agy_capacity_full")
         result = self.tool("wait_agent", {"agent_id":fallback["agent_id"],"wait_seconds":5})
-        self.assertEqual(result["summary"], "agy fixture result")
-        self.tool("interrupt_agent", {"agent_id":slow["agent_id"]})
+        self.assertEqual(result["summary"], "fixture result")
+        for job in slow:
+            self.tool("interrupt_agent", {"agent_id":job["agent_id"]})
 
     def test_interrupt_running_worker(self):
         job=self.tool("spawn_agent", {"cwd":str(self.root),"task":"SLOW_TEST"})

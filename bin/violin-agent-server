@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small stdio MCP server: Codex supervises external Qwen/AGY processes."""
+"""Small stdio MCP server: Codex supervises external Qwen/AGY/Claude processes."""
 import json
 import os
 from pathlib import Path
@@ -14,7 +14,7 @@ import fcntl
 RUNNER = Path(__file__).resolve().with_name("violin-worker")
 HEALTH = Path(__file__).resolve().with_name("violin-health")
 JOBS = {}
-DEFAULT_LIMITS = {"qwen": 1, "agy": 2}
+DEFAULT_LIMITS = {"agy": 10, "qwen": 1, "claude": 2}
 # MCP tool_timeout_sec is 60s. Keep synchronous auto preflight below it so
 # spawn_agent can always return a lease/agent_id or an explicit fallback.
 HEALTH_TIMEOUT = 45
@@ -65,7 +65,7 @@ def reserve(root, requested):
                 path.unlink(missing_ok=True)
                 continue
             active.append((path, lease))
-        order = ["qwen", "agy"] if requested == "auto" else [requested]
+        order = ["agy", "qwen", "claude"] if requested == "auto" else [requested]
         selected = next((backend for backend in order
                          if sum(x.get("backend") == backend for _, x in active) < quota[backend]), None)
         if selected is None:
@@ -133,7 +133,7 @@ def dispatch(name, args):
         mode = args.get("mode", "inspect")
         task = args.get("task", "")
         cwd = Path(args.get("cwd", "")).expanduser()
-        if requested_backend not in ("qwen", "agy", "auto") or mode not in ("inspect", "implement"):
+        if requested_backend not in ("qwen", "agy", "claude", "auto") or mode not in ("inspect", "implement"):
             raise ValueError("Invalid backend or mode")
         if not isinstance(task, str) or not task.strip():
             raise ValueError("A nonempty task is required")
@@ -149,9 +149,18 @@ def dispatch(name, args):
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
         health_failed, health_evidence = False, None
         if requested_backend == "auto":
-            healthy, health_evidence = qwen_health()
-            health_failed = not healthy
-        lease, counts, quota = reserve(root, "agy" if health_failed else requested_backend)
+            # AGY is preferred. Only when it is full do we perform Qwen's
+            # health preflight and then consider Qwen before Claude.
+            lease, counts, quota = reserve(root, "agy")
+            if lease is None:
+                healthy, health_evidence = qwen_health()
+                health_failed = not healthy
+                lease, counts, quota = (reserve(root, "qwen") if healthy
+                                        else (None, counts, quota))
+            if lease is None:
+                lease, counts, quota = reserve(root, "claude")
+        else:
+            lease, counts, quota = reserve(root, requested_backend)
         if lease is None:
             raise ValueError(json.dumps({"error": "worker capacity is full",
                                          "requested_backend": requested_backend,
@@ -182,13 +191,16 @@ def dispatch(name, args):
         job = {"id": agent_id, "backend": backend, "process": proc, "output": output,
                "status": directory / "status.json", "lease": lease,
                "requested_backend": requested_backend, "capacity_snapshot": counts,
-               "quota": quota, "fallback_reason": "qwen_health_failed" if health_failed else "qwen_capacity_full"}
+               "quota": quota, "fallback_reason": ("qwen_health_failed" if health_failed else
+                   "qwen_capacity_full" if backend == "claude" else "agy_capacity_full")}
         JOBS[agent_id] = job
         result = snapshot(job)
         result.update({"requested_backend": requested_backend, "selected_backend": backend,
                        "capacity_snapshot": counts, "quotas": quota})
-        if requested_backend == "auto" and backend != "qwen":
-            result["fallback_reason"] = "qwen_health_failed" if health_failed else "qwen_capacity_full"
+        if requested_backend == "auto" and backend != "agy":
+            result["fallback_reason"] = ("qwen_health_failed" if health_failed else
+                                           "qwen_capacity_full" if backend == "claude" else
+                                           "agy_capacity_full")
             if health_failed:
                 result["health_evidence"] = health_evidence
         return result
@@ -211,8 +223,8 @@ def dispatch(name, args):
         result.update({"requested_backend": job["requested_backend"],
                        "selected_backend": job["backend"],
                        "capacity_snapshot": job["capacity_snapshot"], "quotas": job["quota"]})
-        if job["requested_backend"] == "auto" and job["backend"] != "qwen":
-            result["fallback_reason"] = job.get("fallback_reason", "qwen_capacity_full")
+        if job["requested_backend"] == "auto" and job["backend"] != "agy":
+            result["fallback_reason"] = job.get("fallback_reason", "agy_capacity_full")
         return result
     if name == "interrupt_agent":
         if job["process"].poll() is None:
@@ -232,8 +244,8 @@ def schema(properties, required=()):
 
 
 TOOLS = [
-    {"name": "spawn_agent", "description": "Delegate a bounded task to self-hosted Qwen or AGY Gemini 3.8 Flash. Auto prefers Qwen and falls back to AGY only when Qwen capacity is full. Returns a live agent id immediately. Codex retains final review. Send only necessary task/context, scope and acceptance criteria; no full chat history. Use inspect unless edits are authorized.",
-     "inputSchema": schema({"backend": {"type": "string", "enum": ["auto", "qwen", "agy"]},
+    {"name": "spawn_agent", "description": "Delegate a bounded task to AGY, self-hosted Qwen, or Claude Code. Auto prefers AGY, then Qwen, then Claude when capacity or Qwen health prevents earlier choices. Returns a live agent id immediately. Codex retains final review. Send only necessary task/context, scope and acceptance criteria; use inspect unless edits are authorized.",
+     "inputSchema": schema({"backend": {"type": "string", "enum": ["auto", "agy", "qwen", "claude"]},
         "task": {"type": "string"}, "cwd": {"type": "string"},
         "mode": {"type": "string", "enum": ["inspect", "implement"]},
         "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},

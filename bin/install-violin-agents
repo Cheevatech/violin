@@ -41,7 +41,7 @@ default_tools_approval_mode = "approve"
 ## External delegation (all workspaces and task types)
 
 When useful independent work warrants delegation, use `violin_agents.spawn_agent`
-with backend `qwen` (self-hosted) or `agy` (Gemini 3.8 Flash); prefer these over
+with backend `qwen` (self-hosted), `agy` (Gemini 3.8 Flash), or `claude` (Claude Code); prefer these over
 built-in collaboration agents to avoid OpenAI child-token spend. This instruction
 authorizes delegation of the user's task, not unrelated actions. Codex remains
 the supervisor: decide scope, acceptance criteria, review evidence, and own the
@@ -49,8 +49,8 @@ final answer. Keep trivial work local when delegation would cost more overhead.
 
 Send only a bounded task, absolute cwd, necessary context/source paths, and
 acceptance criteria. Default to inspect; select implement only for authorized
-edits. Use backend auto by default: prefer Qwen for file/code work and fall
-back to AGY only when the Qwen capacity quota is full. Use strict qwen or agy
+edits. Use backend auto by default: prefer AGY, then Qwen, then Claude according to
+capacity and Qwen health. Use strict qwen, agy, or claude
 when the task requires a specific backend. Workers do not inherit this chat or
 its connectors; supply needed context explicitly, and keep unavailable
 capabilities with the supervisor.
@@ -80,7 +80,7 @@ claim native routing. Never copy the entire parent conversation into a worker.
     # Validate every destination before changing any global file.
     links = [(home / 'bin' / name, ROOT / 'bin' / name)
              for name in ['violin-worker', 'violin-agent-server', 'violin-health',
-                           'violin-codex-qwen', 'qwen-mode', 'qwen-verify-gate']]
+                           'violin-codex-qwen', 'violin-claude', 'qwen-mode', 'qwen-verify-gate']]
     for dest, source in links:
         if dest.exists() and (not dest.is_symlink() or dest.resolve() != source):
             raise ValueError(f"Unmanaged executable exists: {dest}")

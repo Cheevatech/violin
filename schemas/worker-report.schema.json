@@ -5,7 +5,7 @@
   "required": ["status", "backend", "exit_code", "final_message_seen", "changed_files", "git_diff_check", "evidence", "metadata_status", "smoke_status"],
   "properties": {
     "status": {"type": "string"},
-    "backend": {"enum": ["qwen", "agy"]},
+    "backend": {"enum": ["qwen", "agy", "claude"]},
     "exit_code": {"type": ["integer", "null"]},
     "final_message_seen": {"type": "boolean"},
     "changed_files": {"type": "array", "items": {"type": "string"}},
@@ -13,7 +13,12 @@
     "evidence": {"type": "string"},
     "error_message": {"type": "string"},
     "metadata_status": {"enum": ["healthy", "degraded", "unavailable", "not_applicable"]},
-    "smoke_status": {"enum": ["passed", "failed", "not_run", "not_applicable"]}
+    "smoke_status": {"enum": ["passed", "failed", "not_run", "not_applicable"]},
+    "requested_backend": {"enum": ["auto", "qwen", "agy", "claude"]},
+    "selected_backend": {"enum": ["qwen", "agy", "claude"]},
+    "fallback_reason": {"type": "string"},
+    "claude_model": {"type": "string"},
+    "credential_error": {"type": "string"}
   },
   "additionalProperties": true
 }

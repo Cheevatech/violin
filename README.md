@@ -2,7 +2,7 @@
 
 ## External workers under Codex supervision
 
-`bin/violin-worker` runs Qwen through the existing Codex launcher, or AGY with
+`bin/violin-worker` runs Qwen through the existing Codex launcher, AGY with
 the exact model `gemini-3.8-flash-medium`. It accepts task text on stdin or via
 `--task-file`, so the supervisor can send a bounded task instead of copying the
 whole conversation.
@@ -10,12 +10,15 @@ whole conversation.
 ```bash
 printf '%s' 'Read README.md and summarize the commands with source paths.' |
   ./bin/violin-worker agy -C /absolute/workspace
+./bin/violin-worker claude -C /absolute/workspace
 ./bin/violin-worker qwen --mode implement -C /absolute/workspace --task-file /path/task.txt
 ```
 
 Inspection is the default. Qwen uses a read-only sandbox; AGY uses plan mode
 with its terminal sandbox (these are different enforcement mechanisms).
-Implementation uses Qwen workspace-write or AGY accept-edits with sandbox.
+Implementation uses Qwen workspace-write, AGY accept-edits with sandbox, or
+Claude Code `acceptEdits`. The MCP server's `auto` order is AGY (10), Qwen (1),
+then Claude Code (2); Qwen health is checked only after AGY capacity is full.
 The runner does not bypass permissions. Run independent commands concurrently
 through the supervisor's execution tool; retain its session handles and poll
 the same handles to completion. Avoid overlapping writers.
@@ -28,7 +31,7 @@ the task. Nonzero exits, missing results, backend errors, and timeouts fail the
 run. The report follows `schemas/worker-report.schema.json`. No automatic
 retry occurs, and a partial Qwen implementation is never retried on AGY.
 
-`VIOLIN_QWEN_BIN`, `VIOLIN_AGY_BIN`, and `VIOLIN_WORKER_RUNS` override executable
+`VIOLIN_QWEN_BIN`, `VIOLIN_AGY_BIN`, `VIOLIN_CLAUDE_BIN`, and `VIOLIN_WORKER_RUNS` override executable
 and evidence locations. Default timeout is 900 seconds; `--timeout` changes it.
 Qwen preflight is shared by `bin/violin-health` and `bin/violin-worker`. It
 reports metadata as `healthy`, `degraded`, or `unavailable`, then runs a real

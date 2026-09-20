@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Canonical bounded worker for Qwen and AGY (Delegation Protocol v1)."""
+"""Canonical bounded worker for Qwen, AGY, and Claude (Delegation Protocol v1)."""
 import argparse, json, os, signal, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 
@@ -59,7 +59,9 @@ def terminate(proc):
 def command(backend, mode, cwd, result, timeout, prompt):
     if backend == "qwen":
         return [os.environ.get("VIOLIN_QWEN_BIN", str(Path.home()/"bin/violin-codex-qwen")), "exec", "--ephemeral", "--skip-git-repo-check", "-C", str(cwd), "-s", "workspace-write" if mode == "implement" else "read-only", "--json", "-o", str(result), "-"]
-    return [os.environ.get("VIOLIN_AGY_BIN", str(Path.home()/".local/bin/agy")), "--add-dir", str(cwd), "--model", "gemini-3.8-flash-medium", "--mode", "accept-edits" if mode == "implement" else "plan", "--sandbox", "--output-format", "json", "--print-timeout", f"{timeout}s", "--print", prompt]
+    if backend == "agy":
+        return [os.environ.get("VIOLIN_AGY_BIN", str(Path.home()/".local/bin/agy")), "--add-dir", str(cwd), "--model", "gemini-3.8-flash-medium", "--mode", "accept-edits" if mode == "implement" else "plan", "--sandbox", "--output-format", "json", "--print-timeout", f"{timeout}s", "--print", prompt]
+    return [os.environ.get("VIOLIN_CLAUDE_BIN", str(Path.home()/"bin/violin-claude")), "--print", "--model", "claude-sonnet-5", "--permission-mode", "acceptEdits" if mode == "implement" else "plan", "--add-dir", str(cwd), "--output-format", "stream-json", "--verbose", prompt]
 
 def health(run, deadline):
     try:
@@ -75,12 +77,12 @@ def make_report(status, backend, code, run, started, activity, metadata, metadat
     except (OSError, ValueError): phase = "failed"
     report = {"status":status, "backend":backend, "exit_code":code, "duration_seconds":round(time.monotonic()-started,2), "evidence":str(run), "phase":phase, "metadata":metadata, "metadata_status":metadata_status, "smoke_status":smoke_status, "usage":usage, "summary":summary[:summary_chars], "summary_truncated":len(summary)>summary_chars, "supervisor_review_required":True, "final_message_seen":final, "changed_files":changed, "git_diff_check":diff}
     if error: report["error_message"] = error
-    if status in ("provider_error", "qwen_unhealthy") or (error and status == "failed"):
-        report["failure_reason"] = "provider_error" if status != "qwen_unhealthy" else status
+    if status in ("provider_error", "qwen_unhealthy", "invalid_json", "empty_final_response") or (error and status == "failed"):
+        report["failure_reason"] = "provider_error" if status == "provider_error" else status
     return report
 
 def main():
-    ap=argparse.ArgumentParser(description=__doc__); ap.add_argument("backend", choices=["qwen","agy"]); ap.add_argument("--mode",choices=["inspect","implement"],default="inspect"); ap.add_argument("-C","--cwd",type=Path,default=Path.cwd()); ap.add_argument("--task-file",type=Path); ap.add_argument("--timeout",type=int,default=900); ap.add_argument("--idle-timeout",type=int,default=300); ap.add_argument("--summary-chars",type=int,default=6000); a=ap.parse_args()
+    ap=argparse.ArgumentParser(description=__doc__); ap.add_argument("backend", choices=["qwen","agy","claude"]); ap.add_argument("--mode",choices=["inspect","implement"],default="inspect"); ap.add_argument("-C","--cwd",type=Path,default=Path.cwd()); ap.add_argument("--task-file",type=Path); ap.add_argument("--timeout",type=int,default=900); ap.add_argument("--idle-timeout",type=int,default=300); ap.add_argument("--summary-chars",type=int,default=6000); a=ap.parse_args()
     if min(a.timeout,a.idle_timeout,a.summary_chars)<=0: ap.error("timeouts and summary-chars must be positive")
     cwd=a.cwd.resolve(strict=True); task=a.task_file.read_text() if a.task_file else sys.stdin.read()
     if not task.strip(): ap.error("a non-empty task is required")
@@ -109,6 +111,7 @@ Task:
                         out.write(line); out.flush()
                         try: event=json.loads(line)
                         except ValueError:
+                            if a.backend == "claude" and line.strip(): state["invalid_json"] = True
                             if "metadata" in line.lower() and "fallback" in line.lower(): state["metadata_degraded"] = True
                             continue
                         typ=event.get("type",""); item=event.get("item") if isinstance(event.get("item"),dict) else {}; ityp=item.get("type","")
@@ -120,6 +123,19 @@ Task:
                         if typ=="item.completed" and ityp=="agent_message": state["text"].append(event_text(event))
                         if typ=="item.completed" and ityp=="error": state["error"]=event_text(event) or str(event.get("error") or "provider returned an error")
                         if typ in ("error","turn.failed"): state["error"]=event_text(event) or str(event.get("error") or "provider returned an error")
+                        if a.backend == "claude":
+                            message = event.get("message") if isinstance(event.get("message"), dict) else {}
+                            content = message.get("content") if isinstance(message.get("content"), list) else []
+                            for block in content:
+                                if isinstance(block, dict) and isinstance(block.get("text"), str): state["text"].append(block["text"])
+                            if typ == "result":
+                                state["terminal"] = True
+                                state["terminal_status"] = event.get("subtype")
+                                state["usage"] = event.get("usage")
+                                if isinstance(event.get("result"), str): state["final_result"] = event["result"]
+                                if event.get("subtype") != "success" or event.get("is_error"):
+                                    state["error"] = state["error"] or event.get("result") or event.get("error") or "Claude returned an error"
+                                activity.event("completed" if not state["error"] else "failed")
                         if typ in ("response.completed","turn.completed"):
                             state["terminal"]=True; response=event.get("response") if isinstance(event.get("response"),dict) else {}; state["terminal_status"]=response.get("status",event.get("status")); state["usage"]=event.get("usage"); state["error"]=state["error"] or event_text(response) or str(response.get("error") or event.get("error") or "") or None; incomplete=response.get("incomplete_details") or event.get("incomplete_details"); state["error"]=state["error"] or (str(incomplete) if incomplete else None); activity.event("completed" if not state["error"] else "failed")
                 finally: done.set()
@@ -138,14 +154,31 @@ Task:
             if payload.get("status")!="SUCCESS" or not isinstance(payload.get("response"),str): raise ValueError(payload.get("error") or "AGY returned a non-success payload")
             result.write_text(payload["response"]); state["text"]=[payload["response"]]; state["usage"]=payload.get("usage")
         except (ValueError,TypeError,OSError) as exc: status="failed"; state["error"]=str(exc)
+    if a.backend == "claude" and state.get("final_result"):
+        result.write_text(state["final_result"])
+    if a.backend == "claude":
+        try:
+            provider_stderr = (run / "stderr.log").read_text()
+        except OSError:
+            provider_stderr = ""
+        if any(marker in provider_stderr.lower() for marker in
+               ("authenticate", "oauth", "authentication", "model not found", "provider error")):
+            state["error"] = state["error"] or provider_stderr.strip()
+            state["credential_error"] = provider_stderr.strip()
     message=result.read_text() if result.exists() else ""; accumulated="".join(state["text"])
     if not message and accumulated.strip(): result.write_text(accumulated); message=accumulated
     final=bool(message.strip())
-    if state["error"] and (status == "completed" or (a.backend == "qwen" and status == "failed")): status="provider_error"
-    if a.backend=="qwen" and status=="completed" and (not state["terminal"] or state["terminal_status"] in ("failed","incomplete") or not final): status="empty_final_response" if not final else "provider_error"
+    if a.backend == "claude" and state.get("invalid_json"):
+        status = "invalid_json"
+        state["error"] = state["error"] or "Claude emitted invalid JSON"
+    if state["error"] and (status == "completed" or (a.backend in ("qwen", "claude") and status == "failed")): status="provider_error"
+    if a.backend in ("qwen", "claude") and status=="completed" and (not state["terminal"] or state["terminal_status"] in ("failed","incomplete","error_during_execution") or not final): status="empty_final_response" if not final else "provider_error"
     after_code,after=git_state(cwd); changed=changed_paths(baseline,after,cwd,root.resolve()); diff={"before_status_exit":baseline_code,"after_status_exit":after_code,"new_changed_files":changed}
     if a.mode=="implement" and status=="completed" and not changed: status="no_changes"
     report=make_report(status,a.backend,code,run,started,activity,metadata,metadata_status,smoke_status,final,changed,diff,state["error"],state["usage"],message,a.summary_chars)
+    if a.backend == "claude": report["claude_model"] = "claude-sonnet-5"
+    if a.backend == "claude" and state.get("credential_error"):
+        report["credential_error"] = state["credential_error"][:a.summary_chars]
     if state.get("metadata_degraded"): report["status_detail"] = "metadata_degraded"
     atomic_json(run/"report.json",report); print(json.dumps(report,ensure_ascii=False)); return 0 if status=="completed" else 1
 

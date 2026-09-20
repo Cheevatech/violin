@@ -81,6 +81,37 @@ print(json.dumps({'status':'SUCCESS','response':'a'*100,'usage':{'total_tokens':
         self.assertEqual(code, 1)
         self.assertEqual(report["status"], "failed")
 
+    def test_claude_stream_result_and_inspect_permission(self):
+        code, report = self.run_worker("claude", """import json,sys
+assert sys.argv[sys.argv.index('--model')+1] == 'claude-sonnet-5'
+assert sys.argv[sys.argv.index('--permission-mode')+1] == 'plan'
+assert sys.argv[sys.argv.index('--output-format')+1] == 'stream-json'
+assert 'Inspect this task' in sys.argv[-1]
+print(json.dumps({'type':'assistant','message':{'content':[{'type':'text','text':'draft'}]}}))
+print(json.dumps({'type':'result','subtype':'success','result':'final answer','usage':{'input_tokens':7}}))
+""")
+        self.assertEqual(code, 0)
+        self.assertEqual(report["summary"], "final answer")
+        self.assertEqual(report["claude_model"], "claude-sonnet-5")
+        self.assertEqual(report["usage"]["input_tokens"], 7)
+
+    def test_claude_implement_permission_and_error(self):
+        code, report = self.run_worker("claude", """import json,sys
+assert sys.argv[sys.argv.index('--permission-mode')+1] == 'acceptEdits'
+print(json.dumps({'type':'result','subtype':'error_during_execution','is_error':True,'result':'OAuth session expired'}))
+""", "--mode", "implement")
+        self.assertEqual(code, 1)
+        self.assertEqual(report["status"], "provider_error")
+        self.assertIn("OAuth session expired", report["error_message"])
+
+    def test_claude_invalid_json_and_empty_result(self):
+        code, report = self.run_worker("claude", "print('not json')")
+        self.assertEqual(code, 1)
+        self.assertEqual(report["status"], "invalid_json")
+        code, report = self.run_worker("claude", "import json; print(json.dumps({'type':'result','subtype':'success'}))")
+        self.assertEqual(code, 1)
+        self.assertEqual(report["status"], "empty_final_response")
+
     def test_missing_result_is_failure(self):
         code, report = self.run_worker("qwen", "print('{\"type\":\"turn.completed\"}')")
         self.assertEqual(code, 1)
