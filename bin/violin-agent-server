@@ -18,6 +18,62 @@ DEFAULT_LIMITS = {"agy": 10, "qwen": 1, "claude": 2}
 # MCP tool_timeout_sec is 60s. Keep synchronous auto preflight below it so
 # spawn_agent can always return a lease/agent_id or an explicit fallback.
 HEALTH_TIMEOUT = 45
+PUBLIC_SUMMARY_CHARS = 1500
+
+
+def public_response(report, requested_backend=None, selected_backend=None,
+                    fallback_reason=None, health_evidence=None):
+    """Project the internal worker report into a bounded MCP response.
+
+    The worker's complete report remains in its evidence directory.  This
+    projection is deliberately the only report shape returned to the parent
+    MCP session, so verbose provider metadata cannot consume supervisor
+    context tokens.
+    """
+    report = report if isinstance(report, dict) else {}
+    summary = report.get("summary", "")
+    if not isinstance(summary, str):
+        summary = str(summary)
+    summary_truncated = bool(report.get("summary_truncated"))
+    if len(summary) > PUBLIC_SUMMARY_CHARS:
+        summary = summary[:PUBLIC_SUMMARY_CHARS]
+        summary_truncated = True
+
+    result = {
+        "agent_id": report.get("agent_id"),
+        "status": report.get("status", "failed"),
+        "requested_backend": (requested_backend if requested_backend is not None
+                               else report.get("requested_backend")),
+        "selected_backend": (selected_backend if selected_backend is not None
+                              else report.get("selected_backend", report.get("backend"))),
+        "fallback_reason": (fallback_reason if fallback_reason is not None
+                             else report.get("fallback_reason")),
+        "phase": report.get("phase"),
+        "summary": summary,
+        "summary_truncated": summary_truncated,
+        "changed_files": report.get("changed_files", []),
+        "evidence": report.get("evidence"),
+        "supervisor_review_required": report.get("supervisor_review_required", True),
+    }
+    if result["status"] == "running":
+        for key in ("last_event_at", "elapsed_seconds"):
+            if key in report:
+                result[key] = report[key]
+        return result
+
+    if result["status"] not in ("completed", "no_changes"):
+        if "exit_code" in report:
+            result["exit_code"] = report["exit_code"]
+        if "error_message" in report or "error" in report:
+            result["error_message"] = report.get("error_message", report.get("error"))
+        result["failure_reason"] = report.get("failure_reason", result["status"])
+        if "credential_error" in report:
+            result["credential_error"] = report["credential_error"]
+        if health_evidence is not None:
+            result["health_evidence"] = health_evidence
+        elif "health_evidence" in report:
+            result["health_evidence"] = report["health_evidence"]
+    return result
 
 
 def limits():
@@ -193,6 +249,8 @@ def dispatch(name, args):
                "requested_backend": requested_backend, "capacity_snapshot": counts,
                "quota": quota, "fallback_reason": ("qwen_health_failed" if health_failed else
                    "qwen_capacity_full" if backend == "claude" else "agy_capacity_full")}
+        if health_evidence is not None:
+            job["health_evidence"] = health_evidence
         JOBS[agent_id] = job
         result = snapshot(job)
         result.update({"requested_backend": requested_backend, "selected_backend": backend,
@@ -203,10 +261,11 @@ def dispatch(name, args):
                                            "agy_capacity_full")
             if health_failed:
                 result["health_evidence"] = health_evidence
-        return result
+        return public_response(result, requested_backend, backend,
+                               result.get("fallback_reason"), result.get("health_evidence"))
     if name == "list_agents":
-        return [{k: v for k, v in snapshot(job).items() if k in
-                 ("agent_id", "backend", "status", "evidence")} for job in JOBS.values()]
+        return [public_response(snapshot(job), job["requested_backend"], job["backend"],
+                                job.get("fallback_reason")) for job in JOBS.values()]
     agent_id = args.get("agent_id")
     if agent_id not in JOBS:
         raise ValueError("Unknown agent_id; do not restart an unobserved task automatically")
@@ -225,7 +284,10 @@ def dispatch(name, args):
                        "capacity_snapshot": job["capacity_snapshot"], "quotas": job["quota"]})
         if job["requested_backend"] == "auto" and job["backend"] != "agy":
             result["fallback_reason"] = job.get("fallback_reason", "agy_capacity_full")
-        return result
+            if job.get("health_evidence") is not None:
+                result["health_evidence"] = job["health_evidence"]
+        return public_response(result, job["requested_backend"], job["backend"],
+                               result.get("fallback_reason"), result.get("health_evidence"))
     if name == "interrupt_agent":
         if job["process"].poll() is None:
             # The runner handles SIGINT and terminates its backend process group.
@@ -233,8 +295,14 @@ def dispatch(name, args):
             try:
                 job["process"].wait(timeout=8)
             except subprocess.TimeoutExpired:
-                return {"agent_id": agent_id, "status": "interrupt_requested"}
-        return snapshot(job)
+                return public_response({"agent_id": agent_id, "status": "running",
+                                        "phase": "interrupt_requested",
+                                        "evidence": str(job["output"].parent)},
+                                       job["requested_backend"], job["backend"])
+        result = snapshot(job)
+        return public_response(result, job["requested_backend"], job["backend"],
+                               result.get("fallback_reason", job.get("fallback_reason")),
+                               result.get("health_evidence", job.get("health_evidence")))
     raise ValueError("Unknown tool")
 
 
@@ -244,16 +312,16 @@ def schema(properties, required=()):
 
 
 TOOLS = [
-    {"name": "spawn_agent", "description": "Delegate a bounded task to AGY, self-hosted Qwen, or Claude Code. Auto prefers AGY, then Qwen, then Claude when capacity or Qwen health prevents earlier choices. Returns a live agent id immediately. Codex retains final review. Send only necessary task/context, scope and acceptance criteria; use inspect unless edits are authorized.",
+    {"name": "spawn_agent", "description": "Delegate a bounded task to AGY, self-hosted Qwen, or Claude Code. Auto prefers AGY, then Qwen, then Claude when capacity or Qwen health prevents earlier choices. Returns a bounded live status/report; full details remain in evidence. If summary_truncated=true, open the report/log there when needed. Codex retains final review. Send only necessary task/context, scope and acceptance criteria; use inspect unless edits are authorized.",
      "inputSchema": schema({"backend": {"type": "string", "enum": ["auto", "agy", "qwen", "claude"]},
         "task": {"type": "string"}, "cwd": {"type": "string"},
         "mode": {"type": "string", "enum": ["inspect", "implement"]},
         "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
         "idle_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600}}, ["task", "cwd"])},
-    {"name": "wait_agent", "description": "Wait up to 50 seconds (default) on the same external agent id. Prefer a full wait to reduce supervisor token overhead. Running is not failure; never restart just because this wait expires. Completed reports contain bounded summary and full evidence paths; verify before accepting.",
+    {"name": "wait_agent", "description": "Wait up to 50 seconds (default) on the same external agent id. Prefer a full wait to reduce supervisor token overhead. Returns a bounded summary; full details remain in evidence. If summary_truncated=true, open the report/log there when needed. Running is not failure; never restart just because this wait expires.",
      "inputSchema": schema({"agent_id": {"type": "string"}, "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 50}}, ["agent_id"])},
-    {"name": "list_agents", "description": "List external worker states by checking their live process handles.", "inputSchema": schema({})},
-    {"name": "interrupt_agent", "description": "Stop an external worker and its backend. Does not revert file changes; inspect evidence before continuing.", "inputSchema": schema({"agent_id": {"type": "string"}}, ["agent_id"])},
+    {"name": "list_agents", "description": "List bounded external worker states by checking their live process handles; full details remain in each evidence directory.", "inputSchema": schema({})},
+    {"name": "interrupt_agent", "description": "Stop an external worker and its backend. Returns a bounded status; full details remain in evidence. Does not revert file changes; inspect evidence before continuing.", "inputSchema": schema({"agent_id": {"type": "string"}}, ["agent_id"])},
 ]
 
 

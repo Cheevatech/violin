@@ -34,13 +34,24 @@ print(json.dumps({'type':'turn.completed'}))
         fake_agy.write_text("""#!/usr/bin/env python3
 import json,sys,time
 if 'SLOW_TEST' in sys.argv[-1]: time.sleep(30)
-print(json.dumps({"status": "SUCCESS", "response": "agy fixture result"}))
+if 'FAIL_TEST' in sys.argv[-1]:
+ print(json.dumps({"status": "ERROR", "error": "fixture provider failed", "usage": {"total_tokens": 10}}))
+else:
+ response = 'x' * 2000 if 'LONG_TEST' in sys.argv[-1] else 'agy fixture result'
+ print(json.dumps({"status": "SUCCESS", "response": response, "usage": {"total_tokens": 10}}))
 """)
         fake_agy.chmod(0o700)
+        fake_claude = self.root / "fake-claude"
+        fake_claude.write_text("""#!/usr/bin/env python3
+import json
+print(json.dumps({"type": "result", "subtype": "success", "result": "claude fixture result", "usage": {"input_tokens": 7}}))
+""")
+        fake_claude.chmod(0o700)
         self.proc = subprocess.Popen([str(SERVER)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True,
             env=dict(os.environ, VIOLIN_QWEN_BIN=str(fake), VIOLIN_WORKER_RUNS=str(self.root/"runs"),
-                     VIOLIN_AGY_BIN=str(fake_agy), VIOLIN_CODEX_MODELS_CACHE=str(cache),
+                     VIOLIN_AGY_BIN=str(fake_agy), VIOLIN_CLAUDE_BIN=str(fake_claude),
+                     VIOLIN_CODEX_MODELS_CACHE=str(cache),
                      VIOLIN_QWEN_MAX_CONCURRENCY="1", VIOLIN_AGY_MAX_CONCURRENCY="10"))
 
     def tearDown(self):
@@ -96,6 +107,38 @@ print(json.dumps({"status": "SUCCESS", "response": "agy fixture result"}))
         self.assertIn("elapsed_seconds", job)
         self.assertTrue(job["evidence"].endswith("agent-" + job["agent_id"]) is False)
         self.tool("interrupt_agent", {"agent_id":job["agent_id"]})
+
+    def test_success_response_is_bounded_and_evidence_is_full(self):
+        job = self.tool("spawn_agent", {"backend": "agy", "cwd": str(self.root), "task": "LONG_TEST"})
+        result = self.tool("wait_agent", {"agent_id": job["agent_id"], "wait_seconds": 5})
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(len(result["summary"]), 1500)
+        self.assertTrue(result["summary_truncated"])
+        self.assertNotIn("usage", result)
+        self.assertNotIn("metadata", result)
+        evidence = Path(result["evidence"])
+        self.assertEqual(len((evidence / "result.txt").read_text()), 2000)
+        full_report = json.loads((evidence / "report.json").read_text())
+        self.assertEqual(len(full_report["summary"]), 2000)
+        self.assertIn("usage", full_report)
+
+    def test_failure_response_is_compact_but_keeps_error_and_evidence(self):
+        job = self.tool("spawn_agent", {"backend": "agy", "cwd": str(self.root), "task": "FAIL_TEST"})
+        result = self.tool("wait_agent", {"agent_id": job["agent_id"], "wait_seconds": 5})
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_message"], "fixture provider failed")
+        self.assertEqual(result["failure_reason"], "failed")
+        self.assertTrue(Path(result["evidence"]).is_dir())
+        self.assertNotIn("usage", result)
+
+    def test_claude_success_response_is_projected(self):
+        job = self.tool("spawn_agent", {"backend": "claude", "cwd": str(self.root), "task": "Read fixture"})
+        result = self.tool("wait_agent", {"agent_id": job["agent_id"], "wait_seconds": 5})
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["selected_backend"], "claude")
+        self.assertEqual(result["summary"], "claude fixture result")
+        self.assertNotIn("usage", result)
+        self.assertNotIn("claude_model", result)
 
     def test_unknown_job_and_relative_workspace_fail(self):
         self.assertTrue(self.tool("wait_agent", {"agent_id":"missing"})["isError"])
