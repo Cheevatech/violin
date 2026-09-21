@@ -143,7 +143,7 @@ print(json.dumps({"type": "result", "subtype": "success", "result": "claude fixt
         hermes.chmod(0o700)
         config = self.root / "agents.toml"
         config.write_text(f'''[backend.agy]
-command = ["{hermes}"]
+command = "{hermes}"
 protocol = "text"
 stdin = false
 ''')
@@ -162,6 +162,35 @@ stdin = false
         result = self.tool("wait_agent", {"agent_id": job["agent_id"], "wait_seconds": 5})
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["summary"], "hermes via mcp")
+
+    def test_mcp_auto_custom_qwen_skips_builtin_health_check(self):
+        hermes = self.root / "fake-qwen-hermes"
+        hermes.write_text("#!/usr/bin/env python3\nprint('custom qwen result')\n")
+        hermes.chmod(0o700)
+        config = self.root / "qwen-agents.toml"
+        config.write_text(f'''[scheduler]
+order = ["qwen", "agy", "claude"]
+
+[backend.qwen]
+command = ["{hermes}"]
+protocol = "text"
+stdin = false
+''')
+        old_proc = self.proc
+        old_proc.terminate()
+        old_proc.wait(timeout=5)
+        old_proc.stdin.close()
+        old_proc.stdout.close()
+        old_proc.stderr.close()
+        self.proc = subprocess.Popen([str(SERVER)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+            env=dict(os.environ, VIOLIN_CONFIG=str(config), VIOLIN_WORKER_RUNS=str(self.root/"qwen-runs"),
+                     VIOLIN_CODEX_MODELS_CACHE=str(self.root/"models.json")))
+        job = self.tool("spawn_agent", {"cwd": str(self.root), "task": "Read fixture"})
+        result = self.tool("wait_agent", {"agent_id": job["agent_id"], "wait_seconds": 5})
+        self.assertEqual(result["selected_backend"], "qwen")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["summary"], "custom qwen result")
 
     def test_unknown_job_and_relative_workspace_fail(self):
         self.assertTrue(self.tool("wait_agent", {"agent_id":"missing"})["isError"])

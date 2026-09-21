@@ -125,7 +125,15 @@ Follow applicable AGENTS.md and CLAUDE.md. Do not delegate further. Report conci
 
 Task:
 {task}
-"""; (run/"task.txt").write_text(prompt); cmd=command(a.backend,a.mode,cwd,result,a.timeout,prompt,run/"task.txt"); proc=None; done=threading.Event(); state={"text":[],"raw":[],"error":None,"terminal":False,"terminal_status":None,"usage":None}; status="failed"; code=None
+"""; (run/"task.txt").write_text(prompt)
+    try:
+        cmd=command(a.backend,a.mode,cwd,result,a.timeout,prompt,run/"task.txt")
+    except (OSError, ValueError) as exc:
+        activity.event("failed")
+        report=make_report("failed",a.backend,None,run,started,activity,metadata,metadata_status,smoke_status,False,[],{},str(exc),None,"",a.summary_chars)
+        report["failure_reason"]="config_error"
+        atomic_json(run/"report.json",report); print(json.dumps(report,ensure_ascii=False)); return 1
+    proc=None; done=threading.Event(); state={"text":[],"raw":[],"error":None,"terminal":False,"terminal_status":None,"usage":None}; status="failed"; code=None
     state["metadata_degraded"] = False
     with (run/"stdout.log").open("w") as out,(run/"stderr.log").open("w") as err:
         try:

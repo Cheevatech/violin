@@ -8,6 +8,7 @@ import uuid
 
 
 BACKENDS = ("agy", "qwen", "claude")
+SUPPORTED_PROTOCOLS = frozenset(("text", "json", "qwen", "agy", "claude"))
 DEFAULTS = {
     "strategy": "round_robin",
     "order": list(BACKENDS),
@@ -15,6 +16,7 @@ DEFAULTS = {
     "machine_max_concurrency": 13,
     "limits": {"agy": 10, "qwen": 1, "claude": 2},
     "commands": {},
+    "custom_commands": {},
     "protocols": {"agy": "agy", "qwen": "qwen", "claude": "claude"},
     "stdin": {"agy": False, "qwen": True, "claude": False},
 }
@@ -35,6 +37,7 @@ def _normalise(value):
     result = dict(DEFAULTS)
     result["limits"] = dict(DEFAULTS["limits"])
     result["commands"] = {}
+    result["custom_commands"] = {}
     result["protocols"] = dict(DEFAULTS["protocols"])
     result["stdin"] = dict(DEFAULTS["stdin"])
     if isinstance(value, dict):
@@ -54,12 +57,13 @@ def _normalise(value):
                 item = backends.get(backend, {})
                 if isinstance(item, dict):
                     result["limits"][backend] = _int(item.get("max_concurrency"), result["limits"][backend])
-                    if item.get("command"):
+                    if "command" in item and item["command"] is not None:
                         command = item["command"]
                         result["commands"][backend] = ([str(x) for x in command]
                                                         if isinstance(command, list)
                                                         else (str(command) if any(c.isspace() for c in str(command))
                                                               else str(Path(command).expanduser())))
+                        result["custom_commands"][backend] = True
                         if ("protocol" not in item and
                                 (isinstance(command, list) or any(c.isspace() for c in str(command)))):
                             result["protocols"][backend] = "text"
@@ -97,6 +101,7 @@ def load_config(path=None):
         command = os.environ.get(f"VIOLIN_{backend.upper()}_BIN")
         if command:
             result["commands"][backend] = command
+            result["custom_commands"][backend] = False
         command_template = os.environ.get(f"VIOLIN_{backend.upper()}_COMMAND")
         if command_template:
             try:
@@ -104,6 +109,7 @@ def load_config(path=None):
             except ValueError:
                 pass
             result["commands"][backend] = command_template
+            result["custom_commands"][backend] = True
         protocol = os.environ.get(f"VIOLIN_{backend.upper()}_PROTOCOL")
         if protocol:
             result["protocols"][backend] = protocol
@@ -114,6 +120,16 @@ def load_config(path=None):
         raise ValueError("scheduler.strategy must be round_robin")
     if not result["order"]:
         raise ValueError("scheduler.order must contain at least one supported backend")
+    for backend in BACKENDS:
+        protocol = result["protocols"][backend]
+        if protocol not in SUPPORTED_PROTOCOLS:
+            raise ValueError(f"unsupported protocol for {backend}: {protocol}")
+        if backend in result["commands"]:
+            command = result["commands"][backend]
+            if not isinstance(command, (str, list)) or not command:
+                raise ValueError(f"command for {backend} must be a non-empty string or list")
+            if isinstance(command, list) and not all(str(part) for part in command):
+                raise ValueError(f"command for {backend} contains an empty argument")
     return result
 
 
@@ -140,7 +156,8 @@ def worker_environment(environment, config):
     result = dict(environment)
     for backend, command in config["commands"].items():
         prefix = f"VIOLIN_{backend.upper()}_"
-        custom = (isinstance(command, list) or
+        custom = (config.get("custom_commands", {}).get(backend, False) or
+                  isinstance(command, list) or
                   (isinstance(command, str) and any(c.isspace() for c in command)) or
                   config["protocols"][backend] != backend or
                   config["stdin"][backend] != DEFAULTS["stdin"][backend])

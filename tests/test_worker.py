@@ -51,6 +51,20 @@ if len(sys.argv) > 1 and sys.argv[1] == 'smoke':
             self.assertEqual(report["summary"], "hermes result")
             self.assertEqual(report["metadata_status"], "not_applicable")
 
+    def test_invalid_command_placeholder_returns_failure_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env = dict(os.environ, VIOLIN_WORKER_RUNS=str(root / "runs"),
+                       VIOLIN_AGY_COMMAND=json.dumps(["hermes", "{unknown}"]),
+                       VIOLIN_AGY_CUSTOM="1", VIOLIN_AGY_PROTOCOL="text")
+            result = subprocess.run([str(RUNNER), "agy", "-C", directory],
+                                    input="Inspect this task", text=True, capture_output=True, env=env)
+            report = json.loads(result.stdout)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(report["status"], "failed")
+            self.assertEqual(report["failure_reason"], "config_error")
+            self.assertIn("Unknown command placeholder", report["error_message"])
+
     def test_qwen_result_and_usage(self):
         code, report = self.run_worker("qwen", """import sys,json,pathlib
 assert sys.argv[1] == 'exec'

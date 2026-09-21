@@ -52,7 +52,10 @@ should share one per-session limit.
 timeout is 900 seconds; `--timeout` changes it.
 
 Backend commands can be replaced in the config with an argv list or a
-shell-like string parsed without a shell. Supported placeholders are
+shell-like string parsed without a shell. A config-file `command` is always
+treated as a generic command, even when it contains only one executable name;
+use the legacy `VIOLIN_<BACKEND>_BIN` environment variable when replacing only
+the built-in launcher path. Supported placeholders are
 `{workspace}`, `{task_file}`, `{result_file}`, `{prompt}`, `{mode}`,
 `{timeout}`, and `{idle_timeout}`. Set `protocol` to `text` or `json` for a
 generic CLI such as Hermes; `stdin = true` sends the generated task prompt on
@@ -65,6 +68,8 @@ command = ["hermes", "run", "--workspace", "{workspace}", "--task-file", "{task_
 protocol = "text"
 stdin = false
 ```
+Custom Qwen commands skip the built-in Qwen metadata/smoke preflight; the
+configured command's own exit status and protocol determine the result.
 Qwen preflight is shared by `bin/violin-health` and `bin/violin-worker`. It
 reports metadata as `healthy`, `degraded`, or `unavailable`, then runs a real
 runtime smoke that proves the final response contains the pinned model and

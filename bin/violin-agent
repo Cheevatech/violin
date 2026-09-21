@@ -52,8 +52,10 @@ def cli_config(args):
 
 
 def qwen_health(config):
+    if config.get("custom_commands", {}).get("qwen"):
+        return True
     env = dict(os.environ, VIOLIN_METADATA_TIMEOUT="8", VIOLIN_SMOKE_TIMEOUT="35")
-    if config["commands"].get("qwen"):
+    if config["commands"].get("qwen") and not config.get("custom_commands", {}).get("qwen"):
         env["VIOLIN_QWEN_BIN"] = config["commands"]["qwen"]
     try:
         result = subprocess.run([str(ROOT / "violin-health")], capture_output=True,

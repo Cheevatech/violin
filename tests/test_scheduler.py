@@ -93,6 +93,24 @@ command = "/custom/claude"
             self.assertEqual(config["limits"]["claude"], 3)
             self.assertEqual(config["commands"]["claude"], "/custom/claude")
 
+    def test_config_command_is_always_custom_even_without_arguments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text('[backend.qwen]\ncommand = "hermes"\nprotocol = "text"\n')
+            config = violin_scheduler.load_config(path)
+            environment = violin_scheduler.worker_environment({}, config)
+            self.assertEqual(config["custom_commands"]["qwen"], True)
+            self.assertEqual(environment["VIOLIN_QWEN_COMMAND"], '"hermes"')
+            self.assertEqual(environment["VIOLIN_QWEN_CUSTOM"], "1")
+            self.assertNotIn("VIOLIN_QWEN_BIN", environment)
+
+    def test_invalid_custom_protocol_is_rejected_early(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text('[backend.agy]\ncommand = ["hermes"]\nprotocol = "ndjson"\n')
+            with self.assertRaisesRegex(ValueError, "unsupported protocol"):
+                violin_scheduler.load_config(path)
+
 
 if __name__ == "__main__":
     unittest.main()
