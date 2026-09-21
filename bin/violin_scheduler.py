@@ -15,6 +15,8 @@ DEFAULTS = {
     "machine_max_concurrency": 13,
     "limits": {"agy": 10, "qwen": 1, "claude": 2},
     "commands": {},
+    "protocols": {"agy": "agy", "qwen": "qwen", "claude": "claude"},
+    "stdin": {"agy": False, "qwen": True, "claude": False},
 }
 
 
@@ -33,6 +35,8 @@ def _normalise(value):
     result = dict(DEFAULTS)
     result["limits"] = dict(DEFAULTS["limits"])
     result["commands"] = {}
+    result["protocols"] = dict(DEFAULTS["protocols"])
+    result["stdin"] = dict(DEFAULTS["stdin"])
     if isinstance(value, dict):
         scheduler = value.get("scheduler", value)
         if isinstance(scheduler, dict):
@@ -51,7 +55,19 @@ def _normalise(value):
                 if isinstance(item, dict):
                     result["limits"][backend] = _int(item.get("max_concurrency"), result["limits"][backend])
                     if item.get("command"):
-                        result["commands"][backend] = str(Path(item["command"]).expanduser())
+                        command = item["command"]
+                        result["commands"][backend] = ([str(x) for x in command]
+                                                        if isinstance(command, list)
+                                                        else (str(command) if any(c.isspace() for c in str(command))
+                                                              else str(Path(command).expanduser())))
+                        if ("protocol" not in item and
+                                (isinstance(command, list) or any(c.isspace() for c in str(command)))):
+                            result["protocols"][backend] = "text"
+                            result["stdin"][backend] = False
+                    if item.get("protocol"):
+                        result["protocols"][backend] = str(item["protocol"])
+                    if "stdin" in item:
+                        result["stdin"][backend] = bool(item["stdin"])
     if not result["order"]:
         result["order"] = list(BACKENDS)
     return result
@@ -81,6 +97,19 @@ def load_config(path=None):
         command = os.environ.get(f"VIOLIN_{backend.upper()}_BIN")
         if command:
             result["commands"][backend] = command
+        command_template = os.environ.get(f"VIOLIN_{backend.upper()}_COMMAND")
+        if command_template:
+            try:
+                command_template = json.loads(command_template)
+            except ValueError:
+                pass
+            result["commands"][backend] = command_template
+        protocol = os.environ.get(f"VIOLIN_{backend.upper()}_PROTOCOL")
+        if protocol:
+            result["protocols"][backend] = protocol
+        stdin = os.environ.get(f"VIOLIN_{backend.upper()}_STDIN")
+        if stdin is not None:
+            result["stdin"][backend] = stdin.lower() in ("1", "true", "yes", "on")
     if result["strategy"] != "round_robin":
         raise ValueError("scheduler.strategy must be round_robin")
     if not result["order"]:
@@ -98,10 +127,31 @@ def config_view(config):
         },
         "backend": {
             name: {"max_concurrency": config["limits"][name],
-                   **({"command": config["commands"][name]} if name in config["commands"] else {})}
+                   **({"command": config["commands"][name]} if name in config["commands"] else {}),
+                   "protocol": config["protocols"][name],
+                   "stdin": config["stdin"][name]}
             for name in BACKENDS
         },
     }
+
+
+def worker_environment(environment, config):
+    """Export backend command adapters for the low-level worker."""
+    result = dict(environment)
+    for backend, command in config["commands"].items():
+        prefix = f"VIOLIN_{backend.upper()}_"
+        custom = (isinstance(command, list) or
+                  (isinstance(command, str) and any(c.isspace() for c in command)) or
+                  config["protocols"][backend] != backend or
+                  config["stdin"][backend] != DEFAULTS["stdin"][backend])
+        if custom:
+            result[prefix + "COMMAND"] = json.dumps(command)
+            result[prefix + "CUSTOM"] = "1"
+            result[prefix + "PROTOCOL"] = config["protocols"][backend]
+            result[prefix + "STDIN"] = "1" if config["stdin"][backend] else "0"
+        else:
+            result[prefix + "BIN"] = str(command)
+    return result
 
 
 def process_alive(pid):

@@ -5,7 +5,7 @@ test:
 	python3 -m unittest discover -s tests
 
 vet:
-	python3 -m py_compile bin/violin-worker bin/violin-health bin/violin-qwen-metadata bin/violin-agent-server bin/install-violin-agents
+	python3 -m py_compile bin/violin_scheduler.py bin/violin-agent bin/violin-worker bin/violin-health bin/violin-qwen-metadata bin/violin-agent-server bin/install-violin-agents
 
 verify: test vet
 

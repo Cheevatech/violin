@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Canonical bounded worker for Qwen, AGY, and Claude (Delegation Protocol v1)."""
-import argparse, json, os, signal, subprocess, sys, tempfile, threading, time
+import argparse, json, os, shlex, signal, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -56,7 +56,29 @@ def terminate(proc):
     except subprocess.TimeoutExpired: os.killpg(proc.pid, signal.SIGKILL); proc.wait()
     except ProcessLookupError: proc.wait()
 
-def command(backend, mode, cwd, result, timeout, prompt):
+def custom_command(backend, mode, cwd, result, timeout, prompt, task_file):
+    raw = os.environ.get(f"VIOLIN_{backend.upper()}_COMMAND")
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        value = raw
+    parts = [str(x) for x in value] if isinstance(value, list) else shlex.split(str(value))
+    values = {"backend": backend, "mode": mode, "workspace": str(cwd),
+              "task_file": str(task_file), "result_file": str(result),
+              "timeout": str(timeout), "idle_timeout": os.environ.get("VIOLIN_IDLE_TIMEOUT", "300"),
+              "prompt": prompt}
+    try:
+        return [part.format(**values) for part in parts]
+    except KeyError as exc:
+        raise ValueError(f"Unknown command placeholder: {{{exc.args[0]}}}")
+
+
+def command(backend, mode, cwd, result, timeout, prompt, task_file):
+    configured = custom_command(backend, mode, cwd, result, timeout, prompt, task_file)
+    if configured is not None:
+        return configured
     if backend == "qwen":
         return [os.environ.get("VIOLIN_QWEN_BIN", str(Path.home()/"bin/violin-codex-qwen")), "exec", "--ephemeral", "--skip-git-repo-check", "-C", str(cwd), "-s", "workspace-write" if mode == "implement" else "read-only", "--json", "-o", str(result), "-"]
     if backend == "agy":
@@ -84,11 +106,14 @@ def make_report(status, backend, code, run, started, activity, metadata, metadat
 def main():
     ap=argparse.ArgumentParser(description=__doc__); ap.add_argument("backend", choices=["qwen","agy","claude"]); ap.add_argument("--mode",choices=["inspect","implement"],default="inspect"); ap.add_argument("-C","--cwd",type=Path,default=Path.cwd()); ap.add_argument("--task-file",type=Path); ap.add_argument("--timeout",type=int,default=900); ap.add_argument("--idle-timeout",type=int,default=300); ap.add_argument("--summary-chars",type=int,default=6000); a=ap.parse_args()
     if min(a.timeout,a.idle_timeout,a.summary_chars)<=0: ap.error("timeouts and summary-chars must be positive")
+    os.environ["VIOLIN_IDLE_TIMEOUT"] = str(a.idle_timeout)
     cwd=a.cwd.resolve(strict=True); task=a.task_file.read_text() if a.task_file else sys.stdin.read()
     if not task.strip(): ap.error("a non-empty task is required")
     root=Path(os.environ.get("VIOLIN_WORKER_RUNS",str(Path.home()/".local/state/violin-workers"))); root.mkdir(parents=True,exist_ok=True,mode=0o700); run=Path(tempfile.mkdtemp(prefix=f"{a.backend}-",dir=root)); started=time.monotonic(); deadline=started+a.timeout; result=run/"result.txt"
     activity=Activity(Path(os.environ.get("VIOLIN_WORKER_STATUS",str(run/"status.json"))),time.time()+a.timeout); activity.write(); metadata=None; metadata_status="not_applicable"; smoke_status="not_applicable"
-    if a.backend=="qwen":
+    custom = os.environ.get(f"VIOLIN_{a.backend.upper()}_CUSTOM") == "1"
+    protocol = os.environ.get(f"VIOLIN_{a.backend.upper()}_PROTOCOL", a.backend)
+    if a.backend=="qwen" and not custom:
         metadata,failure=health(run,deadline); metadata_status=metadata.get("metadata_status","unavailable"); smoke_status=metadata.get("smoke_status","not_run")
         if failure:
             report=make_report(failure,a.backend,None,run,started,activity,metadata,metadata_status,smoke_status,False,[],{},metadata.get("error")); atomic_json(run/"report.json",report); print(json.dumps(report,ensure_ascii=False)); return 1
@@ -100,7 +125,7 @@ Follow applicable AGENTS.md and CLAUDE.md. Do not delegate further. Report conci
 
 Task:
 {task}
-"""; (run/"task.txt").write_text(prompt); cmd=command(a.backend,a.mode,cwd,result,a.timeout,prompt); proc=None; done=threading.Event(); state={"text":[],"error":None,"terminal":False,"terminal_status":None,"usage":None}; status="failed"; code=None
+"""; (run/"task.txt").write_text(prompt); cmd=command(a.backend,a.mode,cwd,result,a.timeout,prompt,run/"task.txt"); proc=None; done=threading.Event(); state={"text":[],"raw":[],"error":None,"terminal":False,"terminal_status":None,"usage":None}; status="failed"; code=None
     state["metadata_degraded"] = False
     with (run/"stdout.log").open("w") as out,(run/"stderr.log").open("w") as err:
         try:
@@ -108,10 +133,10 @@ Task:
             def read_output():
                 try:
                     for line in proc.stdout:
-                        out.write(line); out.flush()
+                        out.write(line); out.flush(); state["raw"].append(line)
                         try: event=json.loads(line)
                         except ValueError:
-                            if a.backend == "claude" and line.strip(): state["invalid_json"] = True
+                            if protocol == "claude" and line.strip(): state["invalid_json"] = True
                             if "metadata" in line.lower() and "fallback" in line.lower(): state["metadata_degraded"] = True
                             continue
                         typ=event.get("type",""); item=event.get("item") if isinstance(event.get("item"),dict) else {}; ityp=item.get("type","")
@@ -123,7 +148,7 @@ Task:
                         if typ=="item.completed" and ityp=="agent_message": state["text"].append(event_text(event))
                         if typ=="item.completed" and ityp=="error": state["error"]=event_text(event) or str(event.get("error") or "provider returned an error")
                         if typ in ("error","turn.failed"): state["error"]=event_text(event) or str(event.get("error") or "provider returned an error")
-                        if a.backend == "claude":
+                        if protocol == "claude":
                             message = event.get("message") if isinstance(event.get("message"), dict) else {}
                             content = message.get("content") if isinstance(message.get("content"), list) else []
                             for block in content:
@@ -136,10 +161,14 @@ Task:
                                 if event.get("subtype") != "success" or event.get("is_error"):
                                     state["error"] = state["error"] or event.get("result") or event.get("error") or "Claude returned an error"
                                 activity.event("completed" if not state["error"] else "failed")
-                        if typ in ("response.completed","turn.completed"):
+                        if typ in ("response.completed","turn.completed") and protocol == "qwen":
                             state["terminal"]=True; response=event.get("response") if isinstance(event.get("response"),dict) else {}; state["terminal_status"]=response.get("status",event.get("status")); state["usage"]=event.get("usage"); state["error"]=state["error"] or event_text(response) or str(response.get("error") or event.get("error") or "") or None; incomplete=response.get("incomplete_details") or event.get("incomplete_details"); state["error"]=state["error"] or (str(incomplete) if incomplete else None); activity.event("completed" if not state["error"] else "failed")
                 finally: done.set()
-            threading.Thread(target=read_output,daemon=True).start(); activity.event("turn_started"); proc.stdin.write(prompt if a.backend=="qwen" else ""); proc.stdin.close()
+            threading.Thread(target=read_output,daemon=True).start(); activity.event("turn_started")
+            send_stdin = custom and os.environ.get(f"VIOLIN_{a.backend.upper()}_STDIN") == "1"
+            if (protocol == "qwen" and not custom) or send_stdin:
+                proc.stdin.write(prompt)
+            proc.stdin.close()
             while proc.poll() is None:
                 if time.monotonic()>=deadline: status="timeout"; activity.event("timeout"); terminate(proc); break
                 if time.monotonic()-activity.last_event>=a.idle_timeout: status="idle_timeout"; activity.event("timeout"); terminate(proc); break
@@ -148,15 +177,43 @@ Task:
             if status == "failed": status="completed" if code==0 else "failed"
         except KeyboardInterrupt: status="interrupted"; activity.event("interrupted"); terminate(proc); code=proc.returncode if proc else None
         except OSError as exc: status="failed"; err.write(str(exc)); activity.event("failed")
-    if a.backend=="agy" and status=="completed":
+    if custom and status == "completed":
+        try:
+            payload_text = "".join(state["raw"])
+            if not payload_text and result.exists():
+                payload_text = result.read_text()
+            if protocol == "text":
+                result.write_text(payload_text.strip())
+                state["text"] = [payload_text.strip()]
+            elif protocol == "json":
+                payload = json.loads(payload_text)
+                if isinstance(payload, str):
+                    value = payload
+                elif isinstance(payload, dict):
+                    if payload.get("status") not in (None, "SUCCESS", "success", "completed"):
+                        raise ValueError(payload.get("error") or "configured command returned an error")
+                    value = payload.get("response", payload.get("result", payload.get("output", payload.get("text", ""))))
+                else:
+                    raise ValueError("configured JSON command returned an unsupported value")
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError("configured command returned no text result")
+                result.write_text(value)
+                state["text"] = [value]
+            else:
+                raise ValueError(f"Unsupported custom protocol: {protocol}")
+            state["terminal"] = True
+        except (ValueError, TypeError, OSError) as exc:
+            status = "failed"
+            state["error"] = str(exc)
+    if protocol=="agy" and status=="completed" and not custom:
         try:
             payload=json.loads((run/"stdout.log").read_text())
             if payload.get("status")!="SUCCESS" or not isinstance(payload.get("response"),str): raise ValueError(payload.get("error") or "AGY returned a non-success payload")
             result.write_text(payload["response"]); state["text"]=[payload["response"]]; state["usage"]=payload.get("usage")
         except (ValueError,TypeError,OSError) as exc: status="failed"; state["error"]=str(exc)
-    if a.backend == "claude" and state.get("final_result"):
+    if protocol == "claude" and state.get("final_result"):
         result.write_text(state["final_result"])
-    if a.backend == "claude":
+    if protocol == "claude" and not custom:
         try:
             provider_stderr = (run / "stderr.log").read_text()
         except OSError:
@@ -168,16 +225,16 @@ Task:
     message=result.read_text() if result.exists() else ""; accumulated="".join(state["text"])
     if not message and accumulated.strip(): result.write_text(accumulated); message=accumulated
     final=bool(message.strip())
-    if a.backend == "claude" and state.get("invalid_json"):
+    if protocol == "claude" and state.get("invalid_json"):
         status = "invalid_json"
         state["error"] = state["error"] or "Claude emitted invalid JSON"
     if state["error"] and (status == "completed" or (a.backend in ("qwen", "claude") and status == "failed")): status="provider_error"
-    if a.backend in ("qwen", "claude") and status=="completed" and (not state["terminal"] or state["terminal_status"] in ("failed","incomplete","error_during_execution") or not final): status="empty_final_response" if not final else "provider_error"
+    if protocol in ("qwen", "claude") and status=="completed" and (not state["terminal"] or state["terminal_status"] in ("failed","incomplete","error_during_execution") or not final): status="empty_final_response" if not final else "provider_error"
     after_code,after=git_state(cwd); changed=changed_paths(baseline,after,cwd,root.resolve()); diff={"before_status_exit":baseline_code,"after_status_exit":after_code,"new_changed_files":changed}
     if a.mode=="implement" and status=="completed" and not changed: status="no_changes"
     report=make_report(status,a.backend,code,run,started,activity,metadata,metadata_status,smoke_status,final,changed,diff,state["error"],state["usage"],message,a.summary_chars)
-    if a.backend == "claude": report["claude_model"] = "claude-sonnet-5"
-    if a.backend == "claude" and state.get("credential_error"):
+    if protocol == "claude" and not custom: report["claude_model"] = "claude-sonnet-5"
+    if protocol == "claude" and state.get("credential_error"):
         report["credential_error"] = state["credential_error"][:a.summary_chars]
     if state.get("metadata_degraded"): report["status_detail"] = "metadata_degraded"
     atomic_json(run/"report.json",report); print(json.dumps(report,ensure_ascii=False)); return 0 if status=="completed" else 1

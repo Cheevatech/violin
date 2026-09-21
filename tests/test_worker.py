@@ -34,6 +34,23 @@ if len(sys.argv) > 1 and sys.argv[1] == 'smoke':
             self.assertTrue((Path(report["evidence"]) / "stderr.log").exists())
             return result.returncode, report
 
+    def test_configured_text_command_can_replace_qwen_launcher(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake = root / "hermes"
+            fake.write_text("#!/usr/bin/env python3\nprint('hermes result')\n")
+            fake.chmod(0o700)
+            (root / "task.txt").write_text("Use Hermes")
+            env = dict(os.environ, VIOLIN_WORKER_RUNS=str(root / "runs"),
+                       VIOLIN_QWEN_COMMAND=json.dumps([str(fake)]),
+                       VIOLIN_QWEN_CUSTOM="1", VIOLIN_QWEN_PROTOCOL="text")
+            result = subprocess.run([str(RUNNER), "qwen", "-C", directory, "--task-file", str(root / "task.txt")],
+                                    text=True, capture_output=True, env=env)
+            report = json.loads(result.stdout)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(report["summary"], "hermes result")
+            self.assertEqual(report["metadata_status"], "not_applicable")
+
     def test_qwen_result_and_usage(self):
         code, report = self.run_worker("qwen", """import sys,json,pathlib
 assert sys.argv[1] == 'exec'

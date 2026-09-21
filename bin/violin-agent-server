@@ -9,7 +9,7 @@ import sys
 import tempfile
 import time
 import uuid
-from violin_scheduler import Scheduler, load_config
+from violin_scheduler import Scheduler, load_config, worker_environment
 
 RUNNER = Path(__file__).resolve().with_name("violin-worker")
 HEALTH = Path(__file__).resolve().with_name("violin-health")
@@ -160,9 +160,7 @@ def dispatch(name, args):
                                            "elapsed_seconds": 0, "pid": None,
                                            "timeout_deadline": None, "command_type": None,
                                            "evidence": str(directory)}))
-        worker_env = dict(os.environ, VIOLIN_WORKER_STATUS=str(status_path))
-        for name, command in config["commands"].items():
-            worker_env[f"VIOLIN_{name.upper()}_BIN"] = command
+        worker_env = worker_environment(dict(os.environ, VIOLIN_WORKER_STATUS=str(status_path)), config)
         try:
             with output.open("w") as out, (directory / "server-stderr.log").open("w") as err:
                 proc = subprocess.Popen([str(RUNNER), backend, "--mode", mode, "-C", str(cwd),

@@ -50,6 +50,21 @@ should share one per-session limit.
 
 `VIOLIN_WORKER_RUNS` overrides the shared lease/evidence location. Default
 timeout is 900 seconds; `--timeout` changes it.
+
+Backend commands can be replaced in the config with an argv list or a
+shell-like string parsed without a shell. Supported placeholders are
+`{workspace}`, `{task_file}`, `{result_file}`, `{prompt}`, `{mode}`,
+`{timeout}`, and `{idle_timeout}`. Set `protocol` to `text` or `json` for a
+generic CLI such as Hermes; `stdin = true` sends the generated task prompt on
+stdin. With no override, the Qwen backend uses the pinned Codex profile
+`qwen3.8-27b` through `violin_lan`.
+
+```toml
+[backend.qwen]
+command = ["hermes", "run", "--workspace", "{workspace}", "--task-file", "{task_file}"]
+protocol = "text"
+stdin = false
+```
 Qwen preflight is shared by `bin/violin-health` and `bin/violin-worker`. It
 reports metadata as `healthy`, `degraded`, or `unavailable`, then runs a real
 runtime smoke that proves the final response contains the pinned model and

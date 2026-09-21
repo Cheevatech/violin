@@ -11,7 +11,7 @@ import tempfile
 import time
 import uuid
 
-from violin_scheduler import BACKENDS, Scheduler, config_view, load_config
+from violin_scheduler import BACKENDS, Scheduler, config_view, load_config, worker_environment
 
 
 ROOT = Path(__file__).resolve().parent
@@ -93,9 +93,7 @@ def spawn(args):
     status = directory / "status.json"
     status.write_text(json.dumps({"phase": "starting", "evidence": str(directory),
                                   "last_event_at": time.time(), "elapsed_seconds": 0}))
-    env = dict(os.environ, VIOLIN_WORKER_STATUS=str(status))
-    for name, command in config["commands"].items():
-        env[f"VIOLIN_{name.upper()}_BIN"] = command
+    env = worker_environment(dict(os.environ, VIOLIN_WORKER_STATUS=str(status)), config)
     proc = subprocess.Popen([str(RUNNER), backend, "--mode", args.mode, "-C", str(Path(args.cwd).resolve()),
                              "--task-file", str(taskfile), "--timeout", str(args.timeout),
                              "--idle-timeout", str(args.idle_timeout)], stdin=subprocess.DEVNULL,
