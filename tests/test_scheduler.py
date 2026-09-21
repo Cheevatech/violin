@@ -111,6 +111,15 @@ command = "/custom/claude"
             with self.assertRaisesRegex(ValueError, "unsupported protocol"):
                 violin_scheduler.load_config(path)
 
+    def test_custom_health_command_is_loaded_and_exported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text('[backend.qwen]\ncommand = ["hermes"]\nhealth_command = ["hermes", "--health"]\n')
+            config = violin_scheduler.load_config(path)
+            self.assertEqual(config["health_commands"]["qwen"], ["hermes", "--health"])
+            self.assertEqual(violin_scheduler.config_view(config)["backend"]["qwen"]["health_command"],
+                             ["hermes", "--health"])
+
 
 if __name__ == "__main__":
     unittest.main()

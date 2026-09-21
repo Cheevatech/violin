@@ -192,6 +192,36 @@ stdin = false
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["summary"], "custom qwen result")
 
+    def test_mcp_auto_custom_qwen_runs_configured_health_command(self):
+        hermes = self.root / "fake-qwen-health"
+        hermes.write_text("#!/usr/bin/env python3\nimport pathlib,sys\npathlib.Path(sys.argv[1]).write_text('ran')\nprint('ran')\n")
+        hermes.chmod(0o700)
+        marker = self.root / "health-ran"
+        config = self.root / "qwen-health-agents.toml"
+        config.write_text(f'''[scheduler]
+order = ["qwen", "agy", "claude"]
+
+[backend.qwen]
+command = ["{hermes}", "{marker}"]
+health_command = ["{hermes}", "{marker}"]
+protocol = "text"
+stdin = false
+''')
+        old_proc = self.proc
+        old_proc.terminate()
+        old_proc.wait(timeout=5)
+        old_proc.stdin.close()
+        old_proc.stdout.close()
+        old_proc.stderr.close()
+        self.proc = subprocess.Popen([str(SERVER)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+            env=dict(os.environ, VIOLIN_CONFIG=str(config), VIOLIN_WORKER_RUNS=str(self.root/"qwen-health-runs")))
+        job = self.tool("spawn_agent", {"cwd": str(self.root), "task": "Read fixture"})
+        result = self.tool("wait_agent", {"agent_id": job["agent_id"], "wait_seconds": 5})
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["summary"], "ran")
+        self.assertTrue(marker.exists())
+
     def test_unknown_job_and_relative_workspace_fail(self):
         self.assertTrue(self.tool("wait_agent", {"agent_id":"missing"})["isError"])
         self.assertTrue(self.tool("spawn_agent", {"cwd":".","task":"Read"})["isError"])

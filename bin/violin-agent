@@ -11,7 +11,7 @@ import tempfile
 import time
 import uuid
 
-from violin_scheduler import BACKENDS, Scheduler, config_view, load_config, worker_environment
+from violin_scheduler import BACKENDS, Scheduler, config_view, load_config, run_custom_health, worker_environment
 
 
 ROOT = Path(__file__).resolve().parent
@@ -53,6 +53,9 @@ def cli_config(args):
 
 def qwen_health(config):
     if config.get("custom_commands", {}).get("qwen"):
+        custom_health, _ = run_custom_health(config, "qwen")
+        if custom_health is not None:
+            return custom_health
         return True
     env = dict(os.environ, VIOLIN_METADATA_TIMEOUT="8", VIOLIN_SMOKE_TIMEOUT="35")
     if config["commands"].get("qwen") and not config.get("custom_commands", {}).get("qwen"):

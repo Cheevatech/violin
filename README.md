@@ -67,9 +67,12 @@ stdin. With no override, the Qwen backend uses the pinned Codex profile
 command = ["hermes", "run", "--workspace", "{workspace}", "--task-file", "{task_file}"]
 protocol = "text"
 stdin = false
+health_command = ["hermes", "--health"]
 ```
-Custom Qwen commands skip the built-in Qwen metadata/smoke preflight; the
-configured command's own exit status and protocol determine the result.
+Custom Qwen commands skip the built-in Qwen metadata/smoke preflight. If
+`health_command` is configured, MCP and CLI run it without a shell before an
+auto-selected Qwen job; otherwise the custom command is accepted without the
+built-in Qwen preflight.
 Qwen preflight is shared by `bin/violin-health` and `bin/violin-worker`. It
 reports metadata as `healthy`, `degraded`, or `unavailable`, then runs a real
 runtime smoke that proves the final response contains the pinned model and

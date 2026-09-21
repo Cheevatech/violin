@@ -3,6 +3,8 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import shlex
+import subprocess
 import time
 import uuid
 
@@ -17,6 +19,7 @@ DEFAULTS = {
     "limits": {"agy": 10, "qwen": 1, "claude": 2},
     "commands": {},
     "custom_commands": {},
+    "health_commands": {},
     "protocols": {"agy": "agy", "qwen": "qwen", "claude": "claude"},
     "stdin": {"agy": False, "qwen": True, "claude": False},
 }
@@ -38,6 +41,7 @@ def _normalise(value):
     result["limits"] = dict(DEFAULTS["limits"])
     result["commands"] = {}
     result["custom_commands"] = {}
+    result["health_commands"] = {}
     result["protocols"] = dict(DEFAULTS["protocols"])
     result["stdin"] = dict(DEFAULTS["stdin"])
     if isinstance(value, dict):
@@ -68,6 +72,11 @@ def _normalise(value):
                                 (isinstance(command, list) or any(c.isspace() for c in str(command)))):
                             result["protocols"][backend] = "text"
                             result["stdin"][backend] = False
+                    if "health_command" in item and item["health_command"] is not None:
+                        health_command = item["health_command"]
+                        result["health_commands"][backend] = ([str(x) for x in health_command]
+                                                               if isinstance(health_command, list)
+                                                               else str(health_command))
                     if item.get("protocol"):
                         result["protocols"][backend] = str(item["protocol"])
                     if "stdin" in item:
@@ -110,6 +119,13 @@ def load_config(path=None):
                 pass
             result["commands"][backend] = command_template
             result["custom_commands"][backend] = True
+        health_command = os.environ.get(f"VIOLIN_{backend.upper()}_HEALTH_COMMAND")
+        if health_command:
+            try:
+                health_command = json.loads(health_command)
+            except ValueError:
+                pass
+            result["health_commands"][backend] = health_command
         protocol = os.environ.get(f"VIOLIN_{backend.upper()}_PROTOCOL")
         if protocol:
             result["protocols"][backend] = protocol
@@ -130,6 +146,12 @@ def load_config(path=None):
                 raise ValueError(f"command for {backend} must be a non-empty string or list")
             if isinstance(command, list) and not all(str(part) for part in command):
                 raise ValueError(f"command for {backend} contains an empty argument")
+        if backend in result["health_commands"]:
+            health_command = result["health_commands"][backend]
+            if not isinstance(health_command, (str, list)) or not health_command:
+                raise ValueError(f"health_command for {backend} must be a non-empty string or list")
+            if isinstance(health_command, list) and not all(str(part) for part in health_command):
+                raise ValueError(f"health_command for {backend} contains an empty argument")
     return result
 
 
@@ -144,11 +166,34 @@ def config_view(config):
         "backend": {
             name: {"max_concurrency": config["limits"][name],
                    **({"command": config["commands"][name]} if name in config["commands"] else {}),
+                   **({"health_command": config["health_commands"][name]}
+                      if name in config.get("health_commands", {}) else {}),
                    "protocol": config["protocols"][name],
                    "stdin": config["stdin"][name]}
             for name in BACKENDS
         },
     }
+
+
+def run_custom_health(config, backend, timeout=45):
+    """Run an optional configured health command without invoking a shell."""
+    command = config.get("health_commands", {}).get(backend)
+    if not command:
+        return None, None
+    try:
+        parts = [str(part) for part in command] if isinstance(command, list) else shlex.split(str(command))
+        if not parts:
+            raise ValueError("health command is empty")
+        result = subprocess.run(parts, capture_output=True, text=True, timeout=timeout)
+        evidence = {
+            "status": "custom_health",
+            "exit_code": result.returncode,
+            "stdout": result.stdout[-2000:],
+            "stderr": result.stderr[-2000:],
+        }
+        return result.returncode == 0, evidence
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        return False, {"status": "custom_health", "error": type(exc).__name__, "message": str(exc)}
 
 
 def worker_environment(environment, config):

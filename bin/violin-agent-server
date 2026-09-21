@@ -9,7 +9,7 @@ import sys
 import tempfile
 import time
 import uuid
-from violin_scheduler import Scheduler, load_config, worker_environment
+from violin_scheduler import Scheduler, load_config, run_custom_health, worker_environment
 
 RUNNER = Path(__file__).resolve().with_name("violin-worker")
 HEALTH = Path(__file__).resolve().with_name("violin-health")
@@ -77,6 +77,9 @@ def public_response(report, requested_backend=None, selected_backend=None,
 
 def qwen_health(config):
     if config.get("custom_commands", {}).get("qwen"):
+        custom_health, evidence = run_custom_health(config, "qwen", HEALTH_TIMEOUT)
+        if custom_health is not None:
+            return custom_health, evidence
         return True, {"status": "custom_command", "skipped": "builtin_qwen_health"}
     try:
         health_env = dict(os.environ, VIOLIN_METADATA_TIMEOUT="8", VIOLIN_SMOKE_TIMEOUT="35")
