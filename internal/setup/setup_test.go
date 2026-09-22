@@ -29,6 +29,17 @@ func TestReplaceManagedBlockRejectsUnmanagedConfig(t *testing.T) {
 	}
 }
 
+func TestRemoveManagedBlockPreservesSurroundingConfig(t *testing.T) {
+	original := "before\n" + startMarker + "\nmanaged\n" + endMarker + "\nafter\n"
+	updated, changed, err := removeManagedBlock(original)
+	if err != nil || !changed || updated != "before\nafter\n" {
+		t.Fatalf("updated=%q changed=%v err=%v", updated, changed, err)
+	}
+	if _, changed, err := removeManagedBlock("unmanaged\n"); err != nil || changed {
+		t.Fatalf("unexpected unmanaged result changed=%v err=%v", changed, err)
+	}
+}
+
 func TestConfigPlanCreatesCredentialFreeTemplate(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

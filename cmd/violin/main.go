@@ -38,6 +38,8 @@ func main() {
 		}
 	case "init":
 		err = installMCP(os.Args[2:])
+	case "uninstall":
+		err = uninstallMCP(os.Args[2:])
 	case "skills":
 		err = skillsCommand(os.Args[2:])
 	case "auth":
@@ -77,7 +79,7 @@ func workerCommand(args []string) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: violin {mcp|init|skills|auth|health|run|wait|list|interrupt|config|model}")
+	fmt.Fprintln(os.Stderr, "usage: violin {mcp|init|uninstall|skills|auth|health|run|wait|list|interrupt|config|model}")
 }
 
 func healthCommand(args []string) error {
@@ -174,6 +176,23 @@ func installMCP(args []string) error {
 		return err
 	}
 	plan, err := setup.MCPPlan(binary, apply)
+	if err != nil {
+		return err
+	}
+	return printJSON(plan)
+}
+
+func uninstallMCP(args []string) error {
+	apply := false
+	for _, arg := range args {
+		if arg == "--apply" {
+			apply = true
+		}
+		if arg == "--dry-run" {
+			apply = false
+		}
+	}
+	plan, err := setup.MCPUninstallPlan(apply)
 	if err != nil {
 		return err
 	}

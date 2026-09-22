@@ -8,6 +8,8 @@ Install the public launcher without installing Go or Python:
 npx violin doctor
 npx violin init --dry-run
 npx violin init --apply
+npx violin uninstall --dry-run
+npx violin uninstall --apply
 npx violin config init --dry-run
 npx violin config init --apply
 npx violin skills install --apply

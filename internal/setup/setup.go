@@ -85,6 +85,35 @@ func MCPRollbackPlan(backup string, apply bool) (Plan, error) {
 	return plan, nil
 }
 
+func MCPUninstallPlan(apply bool) (Plan, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return Plan{}, err
+	}
+	target := filepath.Join(home, ".codex", "config.toml")
+	original, err := os.ReadFile(target)
+	if err != nil {
+		return Plan{}, err
+	}
+	updated, changed, err := removeManagedBlock(string(original))
+	if err != nil {
+		return Plan{}, err
+	}
+	if !changed {
+		return Plan{}, errors.New("managed Violin MCP block not found; refusing to modify config")
+	}
+	plan := Plan{Action: "mcp_uninstall", Target: target, Apply: apply, Changes: diffSummary(string(original), updated)}
+	if !apply {
+		return plan, nil
+	}
+	backup, err := writeBackupAndAtomic(target, []byte(updated))
+	if err != nil {
+		return Plan{}, err
+	}
+	plan.Backup = backup
+	return plan, nil
+}
+
 func ConfigPlan(apply bool) (Plan, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -242,6 +271,18 @@ func replaceManagedBlock(original, block string) (string, error) {
 		return "", errors.New("unmanaged violin MCP configuration exists; refusing to overwrite")
 	}
 	return strings.TrimRight(original, "\n") + "\n\n" + block + "\n", nil
+}
+
+func removeManagedBlock(original string) (string, bool, error) {
+	if !strings.Contains(original, startMarker) {
+		return original, false, nil
+	}
+	before, rest, _ := strings.Cut(original, startMarker)
+	_, after, ok := strings.Cut(rest, endMarker)
+	if !ok {
+		return "", false, errors.New("incomplete managed MCP block; refusing to overwrite")
+	}
+	return strings.TrimRight(before, "\n") + "\n" + strings.TrimLeft(after, "\n"), true, nil
 }
 
 func writeBackupAndAtomic(path string, data []byte) (string, error) {
