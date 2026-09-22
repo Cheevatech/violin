@@ -30,6 +30,8 @@ type response struct {
 }
 
 func Run(in io.Reader, out io.Writer) error {
+	root := workerRoot()
+	defer jobs.InterruptOwned(root, os.Getpid())
 	s := bufio.NewScanner(in)
 	enc := json.NewEncoder(out)
 	for s.Scan() {
@@ -83,11 +85,7 @@ func tools() map[string]any {
 func call(params map[string]any) (any, error) {
 	name, _ := params["name"].(string)
 	args, _ := params["arguments"].(map[string]any)
-	root := os.Getenv("VIOLIN_WORKER_RUNS")
-	if root == "" {
-		home, _ := os.UserHomeDir()
-		root = filepath.Join(home, ".local", "state", "violin-workers")
-	}
+	root := workerRoot()
 	switch name {
 	case "auth_status":
 		settings, err := config.LoadFor("")
@@ -129,6 +127,14 @@ func call(params map[string]any) (any, error) {
 	default:
 		return nil, fmt.Errorf("unknown tool %q", name)
 	}
+}
+
+func workerRoot() string {
+	if root := os.Getenv("VIOLIN_WORKER_RUNS"); root != "" {
+		return root
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "state", "violin-workers")
 }
 
 func intArg(args map[string]any, key string) (int, string) {

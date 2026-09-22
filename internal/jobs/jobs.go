@@ -45,6 +45,7 @@ type Descriptor struct {
 	LayaFallback     bool      `json:"laya_fallback"`
 	LayaModelVersion string    `json:"laya_model_version,omitempty"`
 	LayaError        string    `json:"laya_error,omitempty"`
+	OwnerPID         int       `json:"owner_pid"`
 }
 type Job struct {
 	Descriptor Descriptor
@@ -176,7 +177,7 @@ func Spawn(o Options) (*Job, error) {
 	}
 	_ = stdout.Close()
 	_ = stderr.Close()
-	d := Descriptor{AgentID: fmt.Sprintf("%d-%d", time.Now().UnixNano(), cmd.Process.Pid), Backend: o.Backend, RequestedBackend: o.RequestedBackend, PID: cmd.Process.Pid, Evidence: run, Output: outputPath, Status: statusPath, TaskFile: taskPath, Mode: o.Mode, Timeout: o.Timeout, TimeoutSource: o.TimeoutSource, IdleTimeout: o.IdleTimeout, IdleEnabled: !(o.Backend == "agy" || o.Backend == "qwen"), CreatedAt: time.Now(), LayaMode: os.Getenv("VIOLIN_LAYA_MODE"), LayaFallback: decision.Fallback, LayaModelVersion: decision.ModelVersion, LayaError: decision.Error}
+	d := Descriptor{AgentID: fmt.Sprintf("%d-%d", time.Now().UnixNano(), cmd.Process.Pid), Backend: o.Backend, RequestedBackend: o.RequestedBackend, PID: cmd.Process.Pid, Evidence: run, Output: outputPath, Status: statusPath, TaskFile: taskPath, Mode: o.Mode, Timeout: o.Timeout, TimeoutSource: o.TimeoutSource, IdleTimeout: o.IdleTimeout, IdleEnabled: !(o.Backend == "agy" || o.Backend == "qwen"), OwnerPID: os.Getpid(), CreatedAt: time.Now(), LayaMode: os.Getenv("VIOLIN_LAYA_MODE"), LayaFallback: decision.Fallback, LayaModelVersion: decision.ModelVersion, LayaError: decision.Error}
 	if d.LayaMode == "" {
 		d.LayaMode = "shadow"
 	}
@@ -333,6 +334,24 @@ func List(root string) ([]map[string]any, error) {
 		}
 	}
 	return result, nil
+}
+
+// InterruptOwned stops only jobs spawned by this server process. Descriptors
+// from an earlier server remain recoverable after restart.
+func InterruptOwned(root string, ownerPID int) {
+	entries, err := os.ReadDir(filepath.Join(root, "jobs"))
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		job, err := Open(root, strings.TrimSuffix(entry.Name(), ".json"))
+		if err == nil && job.Descriptor.OwnerPID == ownerPID && job.alive() {
+			_, _ = job.Interrupt()
+		}
+	}
 }
 
 func selectBackend(root string, order []string, backendConfig map[string]config.Backend) (string, error) {
