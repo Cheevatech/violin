@@ -89,6 +89,15 @@ print(json.dumps({'type':'turn.completed'}), flush=True)
         self.assertEqual(code, 0)
         self.assertEqual(report["summary"], "command finished")
 
+    def test_qwen_non_streaming_reasoning_uses_hard_timeout(self):
+        code, report = self.run_worker("qwen", """import json,time
+time.sleep(2)
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'reasoned result'}}))
+print(json.dumps({'type':'turn.completed'}))
+""", "--timeout", "5", "--idle-timeout", "1")
+        self.assertEqual(code, 0)
+        self.assertEqual(report["summary"], "reasoned result")
+
     def test_agy_non_streaming_run_uses_hard_timeout(self):
         code, report = self.run_worker("agy", """import json,time
 time.sleep(2)
@@ -235,15 +244,23 @@ print(json.dumps({'type':'turn.completed'}))
         self.assertEqual(report["status"], "timeout")
         self.assertLess(report["duration_seconds"], 8)
 
-    def test_idle_timeout_after_command_event_writes_phase_and_report(self):
-        code, report = self.run_worker("qwen", """import json,time
-print(json.dumps({'type':'command_execution'}), flush=True)
-time.sleep(30)
-""", "--idle-timeout", "1", "--timeout", "10")
-        self.assertEqual(code, 1)
-        self.assertEqual(report["status"], "idle_timeout")
-        self.assertEqual(report["phase"], "timeout")
-        self.assertEqual(report["phase"], "timeout")
+    def test_custom_command_idle_timeout_writes_phase_and_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake = root / "silent"
+            fake.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n")
+            fake.chmod(0o700)
+            env = dict(os.environ, VIOLIN_WORKER_RUNS=str(root / "runs"),
+                       VIOLIN_QWEN_COMMAND=json.dumps([str(fake)]),
+                       VIOLIN_QWEN_CUSTOM="1", VIOLIN_QWEN_PROTOCOL="text")
+            result = subprocess.run([str(RUNNER), "qwen", "-C", directory,
+                                     "--idle-timeout", "1", "--timeout", "10"],
+                                    input="Inspect this task", text=True,
+                                    capture_output=True, env=env)
+            report = json.loads(result.stdout)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(report["status"], "idle_timeout")
+            self.assertEqual(report["phase"], "timeout")
 
     def test_metadata_cache_entry_passes_preflight(self):
         checker = Path(__file__).resolve().parents[1] / "bin/violin-qwen-metadata"

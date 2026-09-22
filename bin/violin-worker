@@ -183,7 +183,7 @@ Task:
             if (protocol == "qwen" and not custom) or send_stdin:
                 proc.stdin.write(prompt)
             proc.stdin.close()
-            idle_timeout_enabled = not (a.backend == "agy" and protocol == "agy" and not custom)
+            idle_timeout_enabled = not (not custom and protocol in ("agy", "qwen"))
             while proc.poll() is None:
                 if time.monotonic()>=deadline: status="timeout"; activity.event("timeout"); terminate(proc); break
                 if (idle_timeout_enabled and not activity.command_active and
