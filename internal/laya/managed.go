@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -34,6 +35,13 @@ func (e ManagedEngine) Evaluate(request Request) (Result, error) {
 		if e.ModelPath == "" {
 			e.ModelPath, _ = e.Manager.ActivePath()
 		}
+	}
+	if len(e.Runner) == 0 && e.ModelPath != "" {
+		model, err := LoadModel(filepath.Join(e.ModelPath, "model.json"))
+		if err != nil {
+			return e.fallback(request, err)
+		}
+		return model.Evaluate(request)
 	}
 	if len(e.Runner) == 0 {
 		return e.fallback(request, ErrUnavailable)
