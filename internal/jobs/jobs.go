@@ -26,26 +26,27 @@ type Options struct {
 	TimeoutSource                                          string
 }
 type Descriptor struct {
-	AgentID          string    `json:"agent_id"`
-	Backend          string    `json:"backend"`
-	RequestedBackend string    `json:"requested_backend"`
-	PID              int       `json:"pid"`
-	Lease            string    `json:"lease"`
-	Evidence         string    `json:"evidence"`
-	Output           string    `json:"output"`
-	Status           string    `json:"status"`
-	TaskFile         string    `json:"task_file"`
-	Mode             string    `json:"mode"`
-	Timeout          int       `json:"effective_timeout_seconds"`
-	TimeoutSource    string    `json:"timeout_source"`
-	IdleTimeout      int       `json:"idle_timeout_seconds"`
-	IdleEnabled      bool      `json:"idle_timeout_enabled"`
-	CreatedAt        time.Time `json:"created_at"`
-	LayaMode         string    `json:"laya_mode"`
-	LayaFallback     bool      `json:"laya_fallback"`
-	LayaModelVersion string    `json:"laya_model_version,omitempty"`
-	LayaError        string    `json:"laya_error,omitempty"`
-	OwnerPID         int       `json:"owner_pid"`
+	AgentID          string         `json:"agent_id"`
+	Backend          string         `json:"backend"`
+	RequestedBackend string         `json:"requested_backend"`
+	PID              int            `json:"pid"`
+	Lease            string         `json:"lease"`
+	Evidence         string         `json:"evidence"`
+	Output           string         `json:"output"`
+	Status           string         `json:"status"`
+	TaskFile         string         `json:"task_file"`
+	Mode             string         `json:"mode"`
+	Timeout          int            `json:"effective_timeout_seconds"`
+	TimeoutSource    string         `json:"timeout_source"`
+	IdleTimeout      int            `json:"idle_timeout_seconds"`
+	IdleEnabled      bool           `json:"idle_timeout_enabled"`
+	CreatedAt        time.Time      `json:"created_at"`
+	LayaMode         string         `json:"laya_mode"`
+	LayaFallback     bool           `json:"laya_fallback"`
+	LayaModelVersion string         `json:"laya_model_version,omitempty"`
+	LayaError        string         `json:"laya_error,omitempty"`
+	LayaDecision     *laya.Decision `json:"laya_decision,omitempty"`
+	OwnerPID         int            `json:"owner_pid"`
 }
 type Job struct {
 	Descriptor Descriptor
@@ -92,12 +93,7 @@ func Spawn(o Options) (*Job, error) {
 	if layaMode == "" {
 		layaMode = "shadow"
 	}
-	decision := evaluateDecision(o.Root, o.Task, o.Backend, cfg)
-	if o.Backend == "auto" && layaMode == "active" && !decision.Fallback && len(decision.Answers) > 0 {
-		if selected, ok := decision.Answers[0].Value.(string); ok && (selected == "agy" || selected == "qwen" || selected == "claude") {
-			o.Backend = selected
-		}
-	}
+	decision := evaluateDecision(o.Root, o.Task, o.Mode, o.Backend, cfg)
 	if o.Backend == "auto" {
 		order := cfg.Scheduler.Order
 		if len(order) == 0 {
@@ -118,7 +114,11 @@ func Spawn(o Options) (*Job, error) {
 		if len(readyOrder) == 0 && authError != nil {
 			return nil, authError
 		}
-		o.Backend, err = selectBackend(o.Root, readyOrder, cfg.Backend)
+		preferred := []string(nil)
+		if layaMode == "active" && !decision.Fallback && decision.Decision != nil && decision.Decision.Confidence >= 0.80 && decision.Decision.Margin >= 0.15 {
+			preferred = decision.Decision.BackendCandidates
+		}
+		o.Backend, err = selectBackend(o.Root, readyOrder, cfg.Backend, preferred)
 		if err != nil {
 			return nil, err
 		}
@@ -181,7 +181,7 @@ func Spawn(o Options) (*Job, error) {
 	}
 	_ = stdout.Close()
 	_ = stderr.Close()
-	d := Descriptor{AgentID: fmt.Sprintf("%d-%d", time.Now().UnixNano(), cmd.Process.Pid), Backend: o.Backend, RequestedBackend: o.RequestedBackend, PID: cmd.Process.Pid, Evidence: run, Output: outputPath, Status: statusPath, TaskFile: taskPath, Mode: o.Mode, Timeout: o.Timeout, TimeoutSource: o.TimeoutSource, IdleTimeout: o.IdleTimeout, IdleEnabled: config.IdleTimeoutEnabled(o.Backend, cfg.Backend[o.Backend]), OwnerPID: os.Getpid(), CreatedAt: time.Now(), LayaMode: layaMode, LayaFallback: decision.Fallback, LayaModelVersion: decision.ModelVersion, LayaError: decision.Error}
+	d := Descriptor{AgentID: fmt.Sprintf("%d-%d", time.Now().UnixNano(), cmd.Process.Pid), Backend: o.Backend, RequestedBackend: o.RequestedBackend, PID: cmd.Process.Pid, Evidence: run, Output: outputPath, Status: statusPath, TaskFile: taskPath, Mode: o.Mode, Timeout: o.Timeout, TimeoutSource: o.TimeoutSource, IdleTimeout: o.IdleTimeout, IdleEnabled: config.IdleTimeoutEnabled(o.Backend, cfg.Backend[o.Backend]), OwnerPID: os.Getpid(), CreatedAt: time.Now(), LayaMode: layaMode, LayaFallback: decision.Fallback, LayaModelVersion: decision.ModelVersion, LayaError: decision.Error, LayaDecision: decision.Decision}
 	j := &Job{Descriptor: d, path: filepath.Join(o.Root, "jobs", d.AgentID+".json"), cmd: cmd}
 	if err = os.MkdirAll(filepath.Dir(j.path), 0700); err != nil {
 		return nil, err
@@ -247,7 +247,7 @@ func (j *Job) alive() bool {
 	return p.Signal(syscall.Signal(0)) == nil
 }
 func (j *Job) Live() map[string]any {
-	return map[string]any{"agent_id": j.Descriptor.AgentID, "status": "running", "selected_backend": j.Descriptor.Backend, "requested_backend": j.Descriptor.RequestedBackend, "evidence": j.Descriptor.Evidence, "effective_timeout_seconds": j.Descriptor.Timeout, "timeout_source": j.Descriptor.TimeoutSource, "idle_timeout_seconds": j.Descriptor.IdleTimeout, "idle_timeout_enabled": j.Descriptor.IdleEnabled, "laya_mode": j.Descriptor.LayaMode, "laya_fallback": j.Descriptor.LayaFallback, "laya_model_version": j.Descriptor.LayaModelVersion}
+	return map[string]any{"agent_id": j.Descriptor.AgentID, "status": "running", "selected_backend": j.Descriptor.Backend, "requested_backend": j.Descriptor.RequestedBackend, "evidence": j.Descriptor.Evidence, "effective_timeout_seconds": j.Descriptor.Timeout, "timeout_source": j.Descriptor.TimeoutSource, "idle_timeout_seconds": j.Descriptor.IdleTimeout, "idle_timeout_enabled": j.Descriptor.IdleEnabled, "laya_mode": j.Descriptor.LayaMode, "laya_fallback": j.Descriptor.LayaFallback, "laya_model_version": j.Descriptor.LayaModelVersion, "laya_decision": j.Descriptor.LayaDecision}
 }
 
 func (j *Job) Wait(seconds int) (any, error) {
@@ -288,8 +288,57 @@ func (j *Job) finish() (map[string]any, error) {
 	value["agent_id"] = j.Descriptor.AgentID
 	value["selected_backend"] = j.Descriptor.Backend
 	value["requested_backend"] = j.Descriptor.RequestedBackend
+	value["laya_mode"] = j.Descriptor.LayaMode
+	value["laya_fallback"] = j.Descriptor.LayaFallback
+	value["laya_model_version"] = j.Descriptor.LayaModelVersion
+	value["laya_decision"] = j.Descriptor.LayaDecision
+	_ = laya.AppendFeedback(filepath.Dir(j.Descriptor.Evidence), laya.FeedbackEvent{
+		AgentID: j.Descriptor.AgentID, RequestedBackend: j.Descriptor.RequestedBackend, SelectedBackend: j.Descriptor.Backend,
+		Mode: j.Descriptor.Mode, LayaMode: j.Descriptor.LayaMode, ModelVersion: j.Descriptor.LayaModelVersion,
+		Fallback: j.Descriptor.LayaFallback, Confidence: decisionConfidence(j.Descriptor.LayaDecision), Risk: decisionRisk(j.Descriptor.LayaDecision),
+		Outcome: reportOutcome(value), DurationSeconds: reportDuration(value), TimeoutSeconds: j.Descriptor.Timeout,
+		ErrorClass: reportErrorClass(value),
+	})
 	_ = os.Remove(j.path)
 	return value, nil
+}
+
+func decisionConfidence(decision *laya.Decision) float64 {
+	if decision == nil {
+		return 0
+	}
+	return decision.Confidence
+}
+
+func decisionRisk(decision *laya.Decision) laya.Risk {
+	if decision == nil {
+		return ""
+	}
+	return decision.Risk
+}
+
+func reportOutcome(value map[string]any) string {
+	if status, ok := value["status"].(string); ok {
+		return status
+	}
+	return "unknown"
+}
+
+func reportDuration(value map[string]any) float64 {
+	if duration, ok := value["duration_seconds"].(float64); ok {
+		return duration
+	}
+	return 0
+}
+
+func reportErrorClass(value map[string]any) string {
+	if status := reportOutcome(value); status == "completed" {
+		return ""
+	}
+	if phase, ok := value["phase"].(string); ok && phase != "" {
+		return phase
+	}
+	return reportOutcome(value)
 }
 func (j *Job) Interrupt() (map[string]any, error) {
 	_ = syscall.Kill(-j.Descriptor.PID, syscall.SIGINT)
@@ -374,7 +423,7 @@ func InterruptOwned(root string, ownerPID int) {
 	}
 }
 
-func selectBackend(root string, order []string, backendConfig map[string]config.Backend) (string, error) {
+func selectBackend(root string, order []string, backendConfig map[string]config.Backend, preferred []string) (string, error) {
 	if len(order) == 0 {
 		order = []string{"agy", "qwen", "claude"}
 	}
@@ -392,6 +441,12 @@ func selectBackend(root string, order []string, backendConfig map[string]config.
 			counts[job.Descriptor.Backend]++
 		}
 	}
+	for _, candidate := range preferred {
+		if !contains(order, candidate) || counts[candidate] >= capacity(candidate, backendConfig) {
+			continue
+		}
+		return candidate, nil
+	}
 	index := 0
 	statePath := filepath.Join(root, "round-robin.json")
 	if data, err := os.ReadFile(statePath); err == nil {
@@ -404,10 +459,7 @@ func selectBackend(root string, order []string, backendConfig map[string]config.
 	}
 	for offset := 0; offset < len(order); offset++ {
 		candidate := order[(index+offset)%len(order)]
-		limit := backendConfig[candidate].MaxConcurrency
-		if limit == 0 {
-			limit = 1
-		}
+		limit := capacity(candidate, backendConfig)
 		if counts[candidate] < limit {
 			next := (index + offset + 1) % len(order)
 			data, _ := json.Marshal(map[string]int{"index": next})
@@ -416,6 +468,23 @@ func selectBackend(root string, order []string, backendConfig map[string]config.
 		}
 	}
 	return "", errors.New("worker capacity is full")
+}
+
+func contains(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func capacity(name string, backendConfig map[string]config.Backend) int {
+	limit := backendConfig[name].MaxConcurrency
+	if limit == 0 {
+		return 1
+	}
+	return limit
 }
 
 func workerEnv(cfg config.Config, backend, statusPath, root, timeoutSource string) []string {
@@ -431,7 +500,7 @@ func workerEnv(cfg config.Config, backend, statusPath, root, timeoutSource strin
 	return env
 }
 
-func evaluateDecision(root, task, requested string, cfg config.Config) laya.Result {
+func evaluateDecision(root, task, mode, requested string, cfg config.Config) laya.Result {
 	manager, err := models.NewManager(filepath.Join(root, "models"))
 	if err != nil {
 		return laya.Result{Fallback: true, Error: err.Error()}
@@ -442,6 +511,6 @@ func evaluateDecision(root, task, requested string, cfg config.Config) laya.Resu
 		runner = laya.RunnerFromEnv()
 	}
 	engine := laya.ManagedEngine{Manager: manager, Runner: runner, ModelPath: modelPath, Timeout: time.Duration(cfg.Laya.TimeoutSeconds) * time.Second, Fallback: laya.FallbackEngine{}}
-	result, _ := engine.Evaluate(laya.Request{Language: laya.ProtocolLanguage, State: map[string]any{"task": task}, Questions: []laya.Question{{ID: "backend", Kind: laya.Choice, Options: []string{"agy", "qwen", "claude"}, Fallback: requested}}})
+	result, _ := engine.Evaluate(laya.Request{Language: laya.ProtocolLanguage, State: map[string]any{"task": task, "mode": mode}, Questions: []laya.Question{{ID: "backend", Kind: laya.Choice, Options: []string{"agy", "qwen", "claude"}, Fallback: requested}}})
 	return result
 }
