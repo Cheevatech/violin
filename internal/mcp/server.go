@@ -80,6 +80,11 @@ func tools() map[string]any {
 		{"name": "wait_agent", "description": "Wait on an existing agent.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}, "wait_seconds": map[string]any{"type": "integer", "minimum": 0, "maximum": 50}}, []string{"agent_id"})},
 		{"name": "list_agents", "description": "List agent jobs.", "inputSchema": object(map[string]any{}, nil)},
 		{"name": "interrupt_agent", "description": "Interrupt an agent without reverting work.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}}, []string{"agent_id"})},
+		{"name": "laya_route", "description": "Use the installed Laya model to recommend routing, timeout, risk, retry, and execution policy.", "inputSchema": object(map[string]any{"task": map[string]any{"type": "string"}, "cwd": map[string]any{"type": "string"}, "mode": map[string]any{"type": "string", "enum": []string{"inspect", "implement"}}, "backend": map[string]any{"type": "string", "enum": []string{"auto", "agy", "qwen", "claude"}}}, []string{"task"})},
+		{"name": "laya_review_risk", "description": "Review task risk before allowing an implementation, without changing files or spawning a worker.", "inputSchema": object(map[string]any{"task": map[string]any{"type": "string"}, "mode": map[string]any{"type": "string", "enum": []string{"inspect", "implement"}}}, []string{"task"})},
+		{"name": "laya_check_job", "description": "Inspect a Violin worker lifecycle state and supervisor evidence.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}}, []string{"agent_id"})},
+		{"name": "laya_wait_job", "description": "Wait for a Violin worker once and return its terminal or current supervisor state.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}, "wait_seconds": map[string]any{"type": "integer", "minimum": 0, "maximum": 300}}, []string{"agent_id"})},
+		{"name": "laya_explain_decision", "description": "Return the Laya decision and model metadata recorded for a worker.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}}, []string{"agent_id"})},
 		{"name": "auth_status", "description": "Inspect global provider authentication without exposing credentials.", "inputSchema": object(map[string]any{}, nil)},
 		{"name": "health_status", "description": "Run configured provider health checks without exposing credentials.", "inputSchema": object(
 			map[string]any{"provider": map[string]any{"type": "string", "enum": []string{"qwen", "agy", "claude", "all"}}},
@@ -146,9 +151,63 @@ func call(params map[string]any) (any, error) {
 			return nil, err
 		}
 		return job.Interrupt()
+	case "laya_route":
+		task, _ := args["task"].(string)
+		mode := stringArg(args, "mode", "inspect")
+		requested := stringArg(args, "backend", "auto")
+		workspace := stringArg(args, "cwd", "")
+		settings, err := config.LoadFor(workspace)
+		if err != nil {
+			return nil, err
+		}
+		return jobs.EvaluateLaya(root, task, mode, requested, settings), nil
+	case "laya_review_risk":
+		task, _ := args["task"].(string)
+		mode := stringArg(args, "mode", "implement")
+		settings, err := config.LoadFor("")
+		if err != nil {
+			return nil, err
+		}
+		result := jobs.EvaluateLaya(root, task, mode, "auto", settings)
+		if result.Decision == nil {
+			return result, nil
+		}
+		return map[string]any{"risk": result.Decision.Risk, "task_mode": result.Decision.TaskMode, "confidence": result.Decision.Confidence, "margin": result.Decision.Margin, "reason_codes": result.Decision.ReasonCodes, "model_version": result.ModelVersion, "fallback": result.Fallback, "decision": result.Decision}, nil
+	case "laya_check_job":
+		job, err := jobs.Open(root, stringArg(args, "agent_id", ""))
+		if err != nil {
+			return nil, err
+		}
+		return job.Live(), nil
+	case "laya_wait_job":
+		job, err := jobs.Open(root, stringArg(args, "agent_id", ""))
+		if err != nil {
+			return nil, err
+		}
+		seconds, source := intArg(args, "wait_seconds")
+		if source == "" {
+			seconds = 50
+		}
+		if seconds > 300 {
+			seconds = 300
+		}
+		return job.Wait(seconds)
+	case "laya_explain_decision":
+		job, err := jobs.Open(root, stringArg(args, "agent_id", ""))
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"agent_id": job.Descriptor.AgentID, "laya_mode": job.Descriptor.LayaMode, "laya_fallback": job.Descriptor.LayaFallback, "laya_model_version": job.Descriptor.LayaModelVersion, "laya_error": job.Descriptor.LayaError, "laya_decision": job.Descriptor.LayaDecision}, nil
 	default:
 		return nil, fmt.Errorf("unknown tool %q", name)
 	}
+}
+
+func stringArg(args map[string]any, key, fallback string) string {
+	if value, ok := args[key].(string); ok && value != "" {
+		return value
+	}
+	return fallback
 }
 
 func workerRoot() string {
