@@ -18,6 +18,7 @@ import (
 	"github.com/film/violin/internal/credentials"
 	"github.com/film/violin/internal/laya"
 	"github.com/film/violin/internal/models"
+	"github.com/film/violin/internal/supervisor"
 )
 
 type Options struct {
@@ -47,6 +48,9 @@ type Descriptor struct {
 	LayaError        string         `json:"laya_error,omitempty"`
 	LayaDecision     *laya.Decision `json:"laya_decision,omitempty"`
 	OwnerPID         int            `json:"owner_pid"`
+	SupervisorMode   string         `json:"supervisor_mode"`
+	SupervisorState  string         `json:"supervisor_state"`
+	SupervisorStale  int            `json:"supervisor_stale_seconds"`
 }
 type Job struct {
 	Descriptor Descriptor
@@ -181,7 +185,7 @@ func Spawn(o Options) (*Job, error) {
 	}
 	_ = stdout.Close()
 	_ = stderr.Close()
-	d := Descriptor{AgentID: fmt.Sprintf("%d-%d", time.Now().UnixNano(), cmd.Process.Pid), Backend: o.Backend, RequestedBackend: o.RequestedBackend, PID: cmd.Process.Pid, Evidence: run, Output: outputPath, Status: statusPath, TaskFile: taskPath, Mode: o.Mode, Timeout: o.Timeout, TimeoutSource: o.TimeoutSource, IdleTimeout: o.IdleTimeout, IdleEnabled: config.IdleTimeoutEnabled(o.Backend, cfg.Backend[o.Backend]), OwnerPID: os.Getpid(), CreatedAt: time.Now(), LayaMode: layaMode, LayaFallback: decision.Fallback, LayaModelVersion: decision.ModelVersion, LayaError: decision.Error, LayaDecision: decision.Decision}
+	d := Descriptor{AgentID: fmt.Sprintf("%d-%d", time.Now().UnixNano(), cmd.Process.Pid), Backend: o.Backend, RequestedBackend: o.RequestedBackend, PID: cmd.Process.Pid, Evidence: run, Output: outputPath, Status: statusPath, TaskFile: taskPath, Mode: o.Mode, Timeout: o.Timeout, TimeoutSource: o.TimeoutSource, IdleTimeout: o.IdleTimeout, IdleEnabled: config.IdleTimeoutEnabled(o.Backend, cfg.Backend[o.Backend]), OwnerPID: os.Getpid(), CreatedAt: time.Now(), LayaMode: layaMode, LayaFallback: decision.Fallback, LayaModelVersion: decision.ModelVersion, LayaError: decision.Error, LayaDecision: decision.Decision, SupervisorMode: cfg.Laya.Supervisor.Mode, SupervisorState: "starting", SupervisorStale: cfg.Laya.Supervisor.StaleSeconds}
 	j := &Job{Descriptor: d, path: filepath.Join(o.Root, "jobs", d.AgentID+".json"), cmd: cmd}
 	if err = os.MkdirAll(filepath.Dir(j.path), 0700); err != nil {
 		return nil, err
@@ -247,7 +251,27 @@ func (j *Job) alive() bool {
 	return p.Signal(syscall.Signal(0)) == nil
 }
 func (j *Job) Live() map[string]any {
-	return map[string]any{"agent_id": j.Descriptor.AgentID, "status": "running", "selected_backend": j.Descriptor.Backend, "requested_backend": j.Descriptor.RequestedBackend, "evidence": j.Descriptor.Evidence, "effective_timeout_seconds": j.Descriptor.Timeout, "timeout_source": j.Descriptor.TimeoutSource, "idle_timeout_seconds": j.Descriptor.IdleTimeout, "idle_timeout_enabled": j.Descriptor.IdleEnabled, "laya_mode": j.Descriptor.LayaMode, "laya_fallback": j.Descriptor.LayaFallback, "laya_model_version": j.Descriptor.LayaModelVersion, "laya_decision": j.Descriptor.LayaDecision}
+	observation := j.observe()
+	return map[string]any{"agent_id": j.Descriptor.AgentID, "status": "running", "selected_backend": j.Descriptor.Backend, "requested_backend": j.Descriptor.RequestedBackend, "evidence": j.Descriptor.Evidence, "effective_timeout_seconds": j.Descriptor.Timeout, "timeout_source": j.Descriptor.TimeoutSource, "idle_timeout_seconds": j.Descriptor.IdleTimeout, "idle_timeout_enabled": j.Descriptor.IdleEnabled, "laya_mode": j.Descriptor.LayaMode, "laya_fallback": j.Descriptor.LayaFallback, "laya_model_version": j.Descriptor.LayaModelVersion, "laya_decision": j.Descriptor.LayaDecision, "supervisor_mode": j.Descriptor.SupervisorMode, "supervisor_state": observation.State, "supervisor_action": observation.Action, "supervisor_reason": observation.Reason, "supervisor_updated_at": observation.UpdatedAt, "supervisor_last_event_at": observation.LastEvent, "supervisor_event_count": observation.EventCount}
+}
+
+func (j *Job) observe() supervisor.Observation {
+	data, err := os.ReadFile(j.Descriptor.Status)
+	if err != nil {
+		return supervisor.Observe(supervisor.Status{}, j.alive(), time.Now(), supervisorStale(j.Descriptor))
+	}
+	status, err := supervisor.Parse(data)
+	if err != nil {
+		return supervisor.Observe(supervisor.Status{}, j.alive(), time.Now(), supervisorStale(j.Descriptor))
+	}
+	return supervisor.Observe(status, j.alive(), time.Now(), supervisorStale(j.Descriptor))
+}
+
+func supervisorStale(d Descriptor) time.Duration {
+	if d.SupervisorStale > 0 {
+		return time.Duration(d.SupervisorStale) * time.Second
+	}
+	return 15 * time.Second
 }
 
 func (j *Job) Wait(seconds int) (any, error) {
@@ -285,6 +309,12 @@ func (j *Job) finish() (map[string]any, error) {
 	if value == nil {
 		value = map[string]any{"status": "failed", "error_message": "worker ended without a valid report", "evidence": j.Descriptor.Evidence}
 	}
+	observation := j.observe()
+	value["supervisor_mode"] = j.Descriptor.SupervisorMode
+	value["supervisor_state"] = observation.State
+	value["supervisor_action"] = observation.Action
+	value["supervisor_reason"] = observation.Reason
+	value["supervisor_event_count"] = observation.EventCount
 	value["agent_id"] = j.Descriptor.AgentID
 	value["selected_backend"] = j.Descriptor.Backend
 	value["requested_backend"] = j.Descriptor.RequestedBackend

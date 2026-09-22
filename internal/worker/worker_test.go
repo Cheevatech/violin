@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestParseCLIOutputSupportsCommonJSONResultFields(t *testing.T) {
@@ -44,6 +45,25 @@ func TestParseWorkerArgsIncludesIdleTimeout(t *testing.T) {
 	}
 	if options.IdleTimeout != 42 {
 		t.Fatalf("options=%+v", options)
+	}
+}
+
+func TestWriteStatusIncludesSupervisorEvidence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "status.json")
+	t.Setenv("VIOLIN_WORKER_STATUS", path)
+	options := Options{Backend: "qwen", Mode: "inspect", Timeout: 10, IdleTimeout: 3, IdleTimeoutEnabled: false}
+	started := time.Now()
+	writeStatus("running", options, started)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var status map[string]any
+	if err := json.Unmarshal(data, &status); err != nil {
+		t.Fatal(err)
+	}
+	if status["status_version"] != float64(1) || status["supervisor_state"] != "progressing" || status["event_count"] != float64(1) || status["last_event_at"] == nil {
+		t.Fatalf("status=%+v", status)
 	}
 }
 
