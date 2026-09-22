@@ -11,8 +11,8 @@ import time
 import uuid
 
 from violin_scheduler import (BACKENDS, Scheduler, config_view, load_config,
-                              resolve_timeout, run_custom_health)
-from violin_runtime import launch_worker
+                              resolve_timeout)
+from violin_runtime import launch_worker, qwen_health as shared_qwen_health
 
 
 ROOT = Path(__file__).resolve().parent
@@ -52,20 +52,8 @@ def cli_config(args):
 
 
 def qwen_health(config):
-    if config.get("custom_commands", {}).get("qwen"):
-        custom_health, _ = run_custom_health(config, "qwen")
-        if custom_health is not None:
-            return custom_health
-        return True
-    env = dict(os.environ, VIOLIN_METADATA_TIMEOUT="8", VIOLIN_SMOKE_TIMEOUT="35")
-    if config["commands"].get("qwen") and not config.get("custom_commands", {}).get("qwen"):
-        env["VIOLIN_QWEN_BIN"] = config["commands"]["qwen"]
-    try:
-        result = subprocess.run([str(ROOT / "violin-health")], capture_output=True,
-                                text=True, timeout=45, env=env)
-        return result.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        return False
+    healthy, _ = shared_qwen_health(config, ROOT / "violin-health")
+    return healthy
 
 
 def spawn(args):
@@ -95,7 +83,7 @@ def spawn(args):
     task = args.task if args.task is not None else Path(args.task_file).read_text()
     launch = launch_worker(root, Path(args.cwd).resolve(), backend, args.mode, task,
                            timeout, args.idle_timeout, config, "cli-agent-",
-                           stderr_filename="stderr.log")
+                           stderr_filename="stderr.log", timeout_source=timeout_source)
     proc = launch["process"]
     directory, output = launch["directory"], launch["output"]
     scheduler.update_lease(lease, proc.pid)
@@ -105,10 +93,17 @@ def spawn(args):
                        "lease": str(lease), "output": str(output), "evidence": str(directory),
                        "record": str(record), "requested_backend": args.backend,
                        "created_at": time.time(), "effective_timeout_seconds": timeout,
-                       "timeout_source": timeout_source})
+                       "timeout_source": timeout_source,
+                       "idle_timeout_seconds": args.idle_timeout,
+                       "idle_timeout_enabled": launch["idle_timeout_enabled"],
+                       "mode": args.mode, "cwd": str(Path(args.cwd).resolve()),
+                       "owner_pid": os.getpid()})
     if args.background:
         print(json.dumps({"agent_id": agent_id, "status": "running", "selected_backend": backend,
-                          "requested_backend": args.backend, "evidence": str(directory)}, ensure_ascii=False))
+                          "requested_backend": args.backend, "evidence": str(directory),
+                          "effective_timeout_seconds": timeout, "timeout_source": timeout_source,
+                          "idle_timeout_seconds": args.idle_timeout,
+                          "idle_timeout_enabled": launch["idle_timeout_enabled"]}, ensure_ascii=False))
         return 0
     proc.wait()
     return finish(record)

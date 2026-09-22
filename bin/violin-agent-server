@@ -8,9 +8,8 @@ import subprocess
 import sys
 import time
 import uuid
-from violin_scheduler import (Scheduler, load_config, resolve_timeout,
-                               run_custom_health)
-from violin_runtime import launch_worker
+from violin_scheduler import Scheduler, load_config, resolve_timeout
+from violin_runtime import launch_worker, qwen_health as shared_qwen_health
 
 HEALTH = Path(__file__).resolve().with_name("violin-health")
 JOBS = {}
@@ -54,7 +53,8 @@ def public_response(report, requested_backend=None, selected_backend=None,
         "evidence": report.get("evidence"),
         "supervisor_review_required": report.get("supervisor_review_required", True),
     }
-    for key in ("effective_timeout_seconds", "timeout_source", "idle_timeout_enabled"):
+    for key in ("effective_timeout_seconds", "timeout_source", "idle_timeout_seconds",
+                "idle_timeout_enabled"):
         if key in report:
             result[key] = report[key]
     if result["status"] == "running":
@@ -79,20 +79,79 @@ def public_response(report, requested_backend=None, selected_backend=None,
 
 
 def qwen_health(config):
-    if config.get("custom_commands", {}).get("qwen"):
-        custom_health, evidence = run_custom_health(config, "qwen", HEALTH_TIMEOUT)
-        if custom_health is not None:
-            return custom_health, evidence
-        return True, {"status": "custom_command", "skipped": "builtin_qwen_health"}
-    try:
-        health_env = dict(os.environ, VIOLIN_METADATA_TIMEOUT="8", VIOLIN_SMOKE_TIMEOUT="35")
-        if config["commands"].get("qwen") and not config.get("custom_commands", {}).get("qwen"):
-            health_env["VIOLIN_QWEN_BIN"] = config["commands"]["qwen"]
-        process = subprocess.run([str(HEALTH)], capture_output=True, text=True,
-                                 timeout=HEALTH_TIMEOUT, env=health_env)
-        return process.returncode == 0, json.loads(process.stdout)
-    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
-        return False, {"status": "qwen_unhealthy", "error": type(exc).__name__}
+    return shared_qwen_health(config, HEALTH, HEALTH_TIMEOUT)
+
+
+class RecoveredProcess:
+    """Small Popen-compatible handle for a worker surviving server restart."""
+    def __init__(self, pid, output=None):
+        self.pid = int(pid)
+        self.output = Path(output) if output else None
+
+    def poll(self):
+        if self.output and self.output.exists():
+            try:
+                json.loads(self.output.read_text())
+                return 0
+            except (OSError, ValueError):
+                pass
+        try:
+            os.kill(self.pid, 0)
+            return None
+        except (ProcessLookupError, PermissionError, ValueError):
+            return 1
+
+    def wait(self, timeout=None):
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while self.poll() is None:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired("recovered worker", timeout)
+            time.sleep(0.05)
+        return 1
+
+    def send_signal(self, signum):
+        os.kill(self.pid, signum)
+
+
+def job_descriptors(root):
+    path = Path(root) / "server-jobs"
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return path
+
+
+def save_descriptor(job):
+    descriptor = {
+        key: (str(value) if isinstance(value, Path) else value)
+        for key, value in job.items()
+        if key not in ("process", "status")
+    }
+    descriptor.update({"pid": job["process"].pid, "status": str(job["status"]),
+                       "owner_pid": job.get("owner_pid")})
+    path = Path(job["descriptor"])
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(descriptor, ensure_ascii=False, indent=2))
+    os.replace(tmp, path)
+
+
+def recover_jobs(root):
+    recovered = {}
+    for path in job_descriptors(root).glob("*.json"):
+        try:
+            value = json.loads(path.read_text())
+            agent_id = value["id"]
+            pid = int(value["pid"])
+            lease = Path(value["lease"])
+            output = Path(value["output"])
+            status = Path(value["status"])
+            if not lease.exists():
+                path.unlink(missing_ok=True)
+                continue
+            recovered[agent_id] = {**value, "id": agent_id, "process": RecoveredProcess(pid, output),
+                                   "lease": lease, "output": output, "status": status,
+                                   "descriptor": path, "owner_pid": value.get("owner_pid")}
+        except (OSError, ValueError, KeyError, TypeError):
+            path.unlink(missing_ok=True)
+    return recovered
 
 
 def snapshot(job):
@@ -116,6 +175,7 @@ def snapshot(job):
         except (ValueError, OSError):
             result.update(error="Worker ended without a valid report", exit_code=code,
                           evidence=str(job["output"].parent))
+        Path(job.get("descriptor", "")).unlink(missing_ok=True) if job.get("descriptor") else None
     return result
 
 
@@ -162,7 +222,8 @@ def dispatch(name, args):
         backend = json.loads(lease.read_text())["backend"]
         try:
             launch = launch_worker(root, cwd, backend, mode, task, timeout,
-                                   idle_timeout, config, "agent-")
+                                   idle_timeout, config, "agent-",
+                                   timeout_source=timeout_source)
         except OSError:
             scheduler.release_lease(lease)
             raise
@@ -173,12 +234,18 @@ def dispatch(name, args):
         agent_id = str(uuid.uuid4())
         job = {"id": agent_id, "backend": backend, "process": proc, "output": output,
                "status": directory / "status.json", "lease": lease,
+               "taskfile": launch["taskfile"], "evidence": directory,
+               "cwd": cwd, "mode": mode, "policy": {"mode": mode,
+               "idle_timeout_enabled": launch["idle_timeout_enabled"]},
                "requested_backend": requested_backend, "capacity_snapshot": counts,
                "quota": quota, "fallback_reason": ("qwen_health_failed" if health_failed else reason),
                "effective_timeout_seconds": timeout, "timeout_source": timeout_source,
-               "idle_timeout_enabled": launch["idle_timeout_enabled"]}
+               "idle_timeout_enabled": launch["idle_timeout_enabled"],
+               "owner_pid": os.getpid()}
         if health_evidence is not None:
             job["health_evidence"] = health_evidence
+        job["descriptor"] = job_descriptors(root) / f"{agent_id}.json"
+        save_descriptor(job)
         JOBS[agent_id] = job
         result = snapshot(job)
         result.update({"requested_backend": requested_backend, "selected_backend": backend,
@@ -254,6 +321,11 @@ TOOLS = [
 
 
 def main():
+    global JOBS
+    # Descriptors are written after lease+spawn, so a new MCP process can
+    # safely adopt workers that outlived its previous stdio connection.
+    JOBS.update(recover_jobs(Path(os.environ.get("VIOLIN_WORKER_RUNS",
+                                               str(Path.home() / ".local/state/violin-workers")))))
     try:
         for line in sys.stdin:
             request = json.loads(line)
@@ -280,7 +352,7 @@ def main():
             print(json.dumps(response), flush=True)
     finally:
         for job in JOBS.values():
-            if job["process"].poll() is None:
+            if job.get("owner_pid") == os.getpid() and job["process"].poll() is None:
                 job["process"].send_signal(signal.SIGINT)
         for job in JOBS.values():
             try:

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Delegation Protocol v1 worker report",
   "type": "object",
-  "required": ["status", "backend", "exit_code", "final_message_seen", "changed_files", "git_diff_check", "evidence", "metadata_status", "smoke_status"],
+  "required": ["status", "backend", "exit_code", "final_message_seen", "changed_files", "git_diff_check", "evidence", "metadata_status", "smoke_status", "effective_timeout_seconds", "timeout_source", "idle_timeout_seconds", "idle_timeout_enabled"],
   "properties": {
     "status": {"type": "string"},
     "backend": {"enum": ["qwen", "agy", "claude"]},
@@ -18,7 +18,11 @@
     "selected_backend": {"enum": ["qwen", "agy", "claude"]},
     "fallback_reason": {"type": "string"},
     "claude_model": {"type": "string"},
-    "credential_error": {"type": "string"}
+    "credential_error": {"type": "string"},
+    "effective_timeout_seconds": {"type": "integer", "minimum": 1},
+    "timeout_source": {"type": "string"},
+    "idle_timeout_seconds": {"type": "integer", "minimum": 1},
+    "idle_timeout_enabled": {"type": "boolean"}
   },
   "additionalProperties": true
 }

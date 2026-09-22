@@ -122,6 +122,9 @@ def load_config(path=None):
         result["timeouts"]["defaults"][mode] = _int(
             os.environ.get(f"VIOLIN_{mode.upper()}_TIMEOUT_SECONDS"),
             result["timeouts"]["defaults"][mode], 1)
+    if any(value > result["timeouts"]["max_seconds"]
+           for value in result["timeouts"]["defaults"].values()):
+        raise ValueError("timeouts.defaults must not exceed timeouts.max_seconds")
     for backend in BACKENDS:
         result["limits"][backend] = _int(
             os.environ.get(f"VIOLIN_{backend.upper()}_MAX_CONCURRENCY"), result["limits"][backend])
