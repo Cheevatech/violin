@@ -10,7 +10,7 @@ import (
 	"github.com/film/violin/internal/models"
 )
 
-const DefaultModelVersion = "builtin-1"
+const DefaultModelVersion = "builtin-2"
 
 func DefaultModel() Model {
 	return Model{
@@ -22,7 +22,7 @@ func DefaultModel() Model {
 			"backend": {
 				Labels:  []string{"qwen", "agy", "claude"},
 				Bias:    []float64{0, 0, 0},
-				Weights: map[string][]float64{"implement": {2, 0, 0}, "research": {0, 2, 0}, "review": {0, 0, 2}, "reason": {2, 0, 0}},
+				Weights: map[string][]float64{"implement": {3, 0, 0}, "research": {0, 3, 0}, "review": {0, 0, 3}, "reason": {3, 0, 0}},
 			},
 			"task_mode": {
 				Labels:  []string{"inspect", "implement"},
