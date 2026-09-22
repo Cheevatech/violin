@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -24,8 +25,12 @@ type Options struct {
 	Backend, Mode, Workspace, TaskFile string
 	Timeout, IdleTimeout               int
 	IdleTimeoutEnabled                 bool
+	HeartbeatSeconds                   int
+	StartedAt                          time.Time
 	baseline                           []string
 }
+
+var statusWriteMu sync.Mutex
 
 type executionError struct {
 	status string
@@ -79,7 +84,14 @@ func Run(ctx context.Context, options Options) error {
 	}
 	backend := settings.Backend[options.Backend]
 	options.baseline = gitFiles(options.Workspace)
+	options.HeartbeatSeconds = settings.Laya.Supervisor.HeartbeatSeconds
+	if options.HeartbeatSeconds < 1 {
+		options.HeartbeatSeconds = 5
+	}
 	started := time.Now()
+	options.StartedAt = started
+	stopHeartbeat := startHeartbeat(options, started)
+	defer stopHeartbeat()
 	writeStatus("starting", options, started)
 	writeStatus("running", options, started)
 	var text string
@@ -92,22 +104,27 @@ func Run(ctx context.Context, options Options) error {
 	if backend.Transport == "api" || (backend.Transport == "auto" && len(cliCommand) == 0) {
 		provider, err := providers.FromConfigProvider(ctx, settings, credentials.Default(), options.Backend)
 		if err != nil {
+			stopHeartbeat()
 			return writeFailure(options, started, err)
 		}
 		result, err := provider.Execute(ctx, providers.Request{Task: string(task), Workspace: options.Workspace, Mode: options.Mode, Timeout: time.Duration(options.Timeout) * time.Second})
 		if err != nil {
+			stopHeartbeat()
 			return writeFailure(options, started, err)
 		}
 		text, usage = result.Text, result.Usage
 	} else {
 		text, err = runCLI(ctx, cliCommand, string(task), options)
 		if err != nil {
+			stopHeartbeat()
 			return writeFailure(options, started, err)
 		}
 	}
 	if strings.TrimSpace(text) == "" {
+		stopHeartbeat()
 		return writeFailure(options, started, errors.New("provider returned an empty response"))
 	}
+	stopHeartbeat()
 	writeStatus("completed", options, started)
 	return writeReport(options, started, "completed", 0, text, usage, "")
 }
@@ -133,7 +150,11 @@ func runCLI(parent context.Context, command []string, task string, options Optio
 	if len(command) == 0 {
 		return "", errors.New("CLI transport is not configured")
 	}
-	values := map[string]string{"workspace": options.Workspace, "task_file": options.TaskFile, "mode": options.Mode, "timeout": fmt.Sprint(options.Timeout)}
+	started := options.StartedAt
+	if started.IsZero() {
+		started = time.Now()
+	}
+	values := map[string]string{"workspace": options.Workspace, "task": task, "task_file": options.TaskFile, "mode": options.Mode, "timeout": fmt.Sprint(options.Timeout)}
 	argv := make([]string, len(command))
 	for i, value := range command {
 		for key, replacement := range values {
@@ -169,6 +190,7 @@ func runCLI(parent context.Context, command []string, task string, options Optio
 		for {
 			count, err := reader.Read(buffer)
 			if count > 0 {
+				writeStatus("running", options, started)
 				data = append(data, buffer[:count]...)
 				select {
 				case activity <- struct{}{}:
@@ -441,6 +463,12 @@ func gitDiffCheck(workspace string) map[string]any {
 }
 
 func writeStatus(phase string, options Options, started time.Time) {
+	writeStatusState(phase, stateForPhase(phase), true, options, started)
+}
+
+func writeStatusState(phase, state string, event bool, options Options, started time.Time) {
+	statusWriteMu.Lock()
+	defer statusWriteMu.Unlock()
 	path := os.Getenv("VIOLIN_WORKER_STATUS")
 	if path == "" {
 		return
@@ -450,6 +478,68 @@ func writeStatus(phase string, options Options, started time.Time) {
 		idleTimeout = 1
 	}
 	idleEnabled := options.IdleTimeoutEnabled
-	data, _ := json.Marshal(map[string]any{"phase": phase, "pid": os.Getpid(), "elapsed_seconds": time.Since(started).Seconds(), "evidence": os.Getenv("VIOLIN_WORKER_EVIDENCE"), "effective_timeout_seconds": options.Timeout, "timeout_source": timeoutSource(options), "idle_timeout_seconds": idleTimeout, "idle_timeout_enabled": idleEnabled})
-	_ = os.WriteFile(path, data, 0600)
+	value := map[string]any{"status_version": 1, "phase": phase, "supervisor_state": state, "pid": os.Getpid(), "updated_at": time.Now().UTC(), "elapsed_seconds": time.Since(started).Seconds(), "evidence": os.Getenv("VIOLIN_WORKER_EVIDENCE"), "effective_timeout_seconds": options.Timeout, "timeout_source": timeoutSource(options), "idle_timeout_seconds": idleTimeout, "idle_timeout_enabled": idleEnabled}
+	if data, err := os.ReadFile(path); err == nil {
+		var previous map[string]any
+		if json.Unmarshal(data, &previous) == nil {
+			if previous["last_event_at"] != nil {
+				value["last_event_at"] = previous["last_event_at"]
+			}
+			if previous["event_count"] != nil {
+				value["event_count"] = previous["event_count"]
+			}
+		}
+	}
+	if event {
+		value["last_event_at"] = value["updated_at"]
+		count, _ := value["event_count"].(float64)
+		value["event_count"] = int(count) + 1
+	}
+	data, _ := json.Marshal(value)
+	temporary := path + ".tmp"
+	if os.WriteFile(temporary, data, 0600) == nil {
+		_ = os.Rename(temporary, path)
+	}
+}
+
+func stateForPhase(phase string) string {
+	switch phase {
+	case "starting":
+		return "starting"
+	case "completed":
+		return "completed"
+	case "interrupted":
+		return "interrupted"
+	case "timeout", "idle_timeout", "provider_error":
+		return "failed"
+	default:
+		return "progressing"
+	}
+}
+
+func startHeartbeat(options Options, started time.Time) func() {
+	interval := options.HeartbeatSeconds
+	if interval < 1 {
+		interval = 5
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	var stopOnce sync.Once
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(time.Duration(interval) * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				writeStatusState("running", "reasoning", false, options, started)
+			case <-stop:
+				return
+			}
+		}
+	}()
+	return func() {
+		stopOnce.Do(func() { close(stop) })
+		<-done
+	}
 }

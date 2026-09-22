@@ -162,6 +162,14 @@ timeout_seconds = 10
 # the verified English model; runner is only for development adapters.
 # runner = ["your-laya-runtime"]
 
+[laya.supervisor]
+mode = "shadow"
+heartbeat_seconds = 5
+stale_seconds = 15
+extension_seconds = 300
+max_extensions = 2
+max_retries = 1
+
 # Configure one or more providers explicitly. Examples:
 # [backend.qwen]
 # transport = "cli"

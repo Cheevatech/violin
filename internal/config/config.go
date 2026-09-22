@@ -48,9 +48,19 @@ type Scheduler struct {
 }
 
 type Laya struct {
-	Mode           string   `toml:"mode" json:"mode"`
-	Runner         []string `toml:"runner" json:"runner,omitempty"`
-	TimeoutSeconds int      `toml:"timeout_seconds" json:"timeout_seconds"`
+	Mode           string     `toml:"mode" json:"mode"`
+	Runner         []string   `toml:"runner" json:"runner,omitempty"`
+	TimeoutSeconds int        `toml:"timeout_seconds" json:"timeout_seconds"`
+	Supervisor     Supervisor `toml:"supervisor" json:"supervisor"`
+}
+
+type Supervisor struct {
+	Mode             string `toml:"mode" json:"mode"`
+	HeartbeatSeconds int    `toml:"heartbeat_seconds" json:"heartbeat_seconds"`
+	StaleSeconds     int    `toml:"stale_seconds" json:"stale_seconds"`
+	ExtensionSeconds int    `toml:"extension_seconds" json:"extension_seconds"`
+	MaxExtensions    int    `toml:"max_extensions" json:"max_extensions"`
+	MaxRetries       int    `toml:"max_retries" json:"max_retries"`
 }
 
 type Config struct {
@@ -69,7 +79,7 @@ func Defaults() Config {
 			"claude": {MaxConcurrency: 2, Protocol: "claude"},
 		},
 		Timeouts: Timeouts{MaxSeconds: 14400, Defaults: map[string]int{"inspect": 900, "implement": 3600}},
-		Laya:     Laya{Mode: "shadow", TimeoutSeconds: 10},
+		Laya:     Laya{Mode: "shadow", TimeoutSeconds: 10, Supervisor: Supervisor{Mode: "shadow", HeartbeatSeconds: 5, StaleSeconds: 15, ExtensionSeconds: 300, MaxExtensions: 2, MaxRetries: 1}},
 	}
 }
 
@@ -139,6 +149,15 @@ func loadFiles(paths []string) (Config, error) {
 		return c, os.ErrInvalid
 	}
 	if c.Laya.TimeoutSeconds < 1 {
+		return c, os.ErrInvalid
+	}
+	if c.Laya.Supervisor.Mode == "" {
+		c.Laya.Supervisor = Defaults().Laya.Supervisor
+	}
+	if c.Laya.Supervisor.Mode != "shadow" && c.Laya.Supervisor.Mode != "advisory" && c.Laya.Supervisor.Mode != "active" {
+		return c, os.ErrInvalid
+	}
+	if c.Laya.Supervisor.HeartbeatSeconds < 1 || c.Laya.Supervisor.StaleSeconds < c.Laya.Supervisor.HeartbeatSeconds || c.Laya.Supervisor.ExtensionSeconds < 1 || c.Laya.Supervisor.MaxExtensions < 0 || c.Laya.Supervisor.MaxRetries < 0 || c.Laya.Supervisor.MaxRetries > 1 {
 		return c, os.ErrInvalid
 	}
 	if c.Timeouts.Defaults["inspect"] > c.Timeouts.MaxSeconds || c.Timeouts.Defaults["implement"] > c.Timeouts.MaxSeconds {
