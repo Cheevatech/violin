@@ -29,6 +29,10 @@ function cachePath() {
   return path.join(base, 'violin', VERSION, platformKey(), 'violin');
 }
 
+function cacheMetadataPath() {
+  return `${cachePath()}.json`;
+}
+
 function releaseBase() {
   return process.env.VIOLIN_RELEASE_BASE_URL || `https://github.com/${OWNER}/${REPOSITORY}/releases/download/v${VERSION}`;
 }
@@ -57,7 +61,21 @@ function verifySignature(manifestData) {
 
 async function ensureBinary() {
   const target = cachePath();
-  if (fs.existsSync(target)) return target;
+  const metadata = cacheMetadataPath();
+  if (fs.existsSync(target) && fs.existsSync(metadata)) {
+    try {
+      const recorded = JSON.parse(fs.readFileSync(metadata, 'utf8'));
+      const actual = crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex');
+      const executable = (fs.statSync(target).mode & 0o111) !== 0;
+      if (recorded.version === VERSION && recorded.platform === platformKey() && recorded.sha256 === actual && executable) {
+        return target;
+      }
+    } catch (_) {
+      // Treat an unreadable cache entry as invalid and fetch a clean artifact.
+    }
+    fs.rmSync(target, { force: true });
+    fs.rmSync(metadata, { force: true });
+  }
   fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
   const manifest = JSON.parse((await fetchBytes(manifestURL())).toString('utf8'));
   verifySignature(manifest);
@@ -69,6 +87,7 @@ async function ensureBinary() {
   const temporary = `${target}.tmp-${process.pid}`;
   fs.writeFileSync(temporary, data, { mode: 0o700 });
   fs.renameSync(temporary, target);
+  fs.writeFileSync(metadata, JSON.stringify({ version: VERSION, platform: platformKey(), sha256: actual }) + '\n', { mode: 0o600 });
   return target;
 }
 
@@ -91,4 +110,4 @@ if (require.main === module) main(process.argv.slice(2)).catch(error => {
   process.exit(1);
 });
 
-module.exports = { platformKey, cachePath, releaseBase, verifySignature };
+module.exports = { platformKey, cachePath, cacheMetadataPath, releaseBase, verifySignature, ensureBinary };
