@@ -1,6 +1,12 @@
 package laya
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
+
+const ProtocolLanguage = "en"
 
 type Kind string
 
@@ -19,6 +25,7 @@ type Question struct {
 	Fallback string   `json:"fallback,omitempty"`
 }
 type Request struct {
+	Language     string     `json:"language,omitempty"`
 	State        any        `json:"state"`
 	Questions    []Question `json:"questions"`
 	ModelVersion string     `json:"model_version,omitempty"`
@@ -45,6 +52,12 @@ var ErrUnavailable = errors.New("laya model unavailable")
 type FallbackEngine struct{ ModelVersion string }
 
 func (e FallbackEngine) Evaluate(request Request) (Result, error) {
+	if strings.TrimSpace(request.Language) == "" {
+		request.Language = ProtocolLanguage
+	}
+	if strings.ToLower(strings.TrimSpace(request.Language)) != ProtocolLanguage {
+		return Result{ModelVersion: e.ModelVersion, Fallback: true}, fmt.Errorf("unsupported Laya protocol language %q: Violin requires English (en)", request.Language)
+	}
 	result := Result{ModelVersion: e.ModelVersion, Fallback: true}
 	for _, q := range request.Questions {
 		answer := Answer{ID: q.ID, Kind: q.Kind, Confidence: 0, Fallback: true}

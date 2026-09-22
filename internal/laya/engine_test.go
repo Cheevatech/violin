@@ -14,3 +14,10 @@ func TestFallbackEngineReturnsTypedAnswers(t *testing.T) {
 		t.Fatalf("unexpected choice: %+v", result.Answers[0])
 	}
 }
+
+func TestFallbackEngineRejectsNonEnglishProtocol(t *testing.T) {
+	_, err := (FallbackEngine{}).Evaluate(Request{Language: "th", Questions: []Question{{ID: "backend", Kind: Choice, Options: []string{"qwen"}}}})
+	if err == nil {
+		t.Fatal("expected non-English protocol rejection")
+	}
+}

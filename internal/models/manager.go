@@ -19,8 +19,15 @@ type Artifact struct {
 	SHA256 string `json:"sha256"`
 	Size   int64  `json:"size,omitempty"`
 }
+
+const (
+	DefaultModelID  = "laya-english"
+	DefaultLanguage = "en"
+)
+
 type Manifest struct {
 	ID        string     `json:"id"`
+	Language  string     `json:"language"`
 	Version   string     `json:"version"`
 	Source    string     `json:"source"`
 	Revision  string     `json:"revision"`
@@ -51,6 +58,9 @@ func NewManager(root string) (*Manager, error) {
 func (m *Manager) Install(manifest Manifest, sourceDir string, activate bool) error {
 	if manifest.ID == "" || manifest.Version == "" || len(manifest.Artifacts) == 0 {
 		return errors.New("model manifest requires id, version, and artifacts")
+	}
+	if strings.ToLower(strings.TrimSpace(manifest.Language)) != DefaultLanguage {
+		return fmt.Errorf("unsupported Laya model language %q: Violin requires English (en)", manifest.Language)
 	}
 	if sourceDir == "" {
 		return errors.New("model source directory is required")

@@ -13,9 +13,11 @@ The repository now contains a Go control-plane binary built with `make go-build`
 ```
 
 The Go binary owns MCP, job lifecycle, evidence descriptors, and model activation.
-The Laya multilingual model is a separately versioned artifact managed under the
-shared worker state directory; activation is atomic and checksum failures leave
-the current model untouched. Laya decisions are initially fallback-safe and can
+The Laya English checkpoint is a separately versioned artifact managed under the
+shared worker state directory. Its manifest must declare `language: "en"`;
+multilingual checkpoints are intentionally outside this control-plane contract.
+Activation is atomic and checksum failures leave the current model untouched.
+Laya decisions are initially fallback-safe and can
 be rolled out from shadow to advisory to active mode without changing provider
 worker commands. A base Laya checkpoint must not be treated as production
 routing policy until violin has a domain-tuned, calibrated artifact and replay
