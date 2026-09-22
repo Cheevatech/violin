@@ -338,7 +338,12 @@ func writeReport(options Options, started time.Time, status string, exitCode int
 		idleTimeout = 1
 	}
 	idleEnabled := options.IdleTimeout > 0 && options.Backend != "qwen" && options.Backend != "agy"
-	report := map[string]any{"status": status, "backend": options.Backend, "exit_code": exitCode, "duration_seconds": time.Since(started).Seconds(), "evidence": run, "phase": status, "metadata_status": "not_applicable", "smoke_status": "not_applicable", "final_message_seen": strings.TrimSpace(text) != "", "changed_files": changed, "git_diff_check": diffCheck, "effective_timeout_seconds": options.Timeout, "timeout_source": timeoutSource(options), "idle_timeout_seconds": idleTimeout, "idle_timeout_enabled": idleEnabled, "summary": text, "usage": usage}
+	const summaryLimit = 6000
+	summary := text
+	if len(summary) > summaryLimit {
+		summary = summary[:summaryLimit]
+	}
+	report := map[string]any{"status": status, "backend": options.Backend, "exit_code": exitCode, "duration_seconds": time.Since(started).Seconds(), "evidence": run, "phase": status, "metadata_status": "not_applicable", "smoke_status": "not_applicable", "final_message_seen": strings.TrimSpace(text) != "", "changed_files": changed, "git_diff_check": diffCheck, "effective_timeout_seconds": options.Timeout, "timeout_source": timeoutSource(options), "idle_timeout_seconds": idleTimeout, "idle_timeout_enabled": idleEnabled, "summary": summary, "summary_truncated": len(text) > summaryLimit, "supervisor_review_required": true, "usage": usage}
 	if errorMessage != "" {
 		report["error_message"] = errorMessage
 	}
