@@ -17,6 +17,7 @@ import (
 	"github.com/film/violin/internal/credentials"
 	"github.com/film/violin/internal/health"
 	"github.com/film/violin/internal/jobs"
+	"github.com/film/violin/internal/laya"
 	"github.com/film/violin/internal/mcp"
 	"github.com/film/violin/internal/models"
 	"github.com/film/violin/internal/setup"
@@ -38,6 +39,8 @@ func main() {
 		}
 	case "init":
 		err = installMCP(os.Args[2:])
+	case "install":
+		err = installRuntime()
 	case "uninstall":
 		err = uninstallMCP(os.Args[2:])
 	case "skills":
@@ -79,7 +82,21 @@ func workerCommand(args []string) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: violin {mcp|init|uninstall|skills|auth|health|run|wait|list|interrupt|config|model}")
+	fmt.Fprintln(os.Stderr, "usage: violin {install|mcp|init|uninstall|skills|auth|health|run|wait|list|interrupt|config|model}")
+}
+
+func installRuntime() error {
+	if err := laya.EnsureDefaultModel(root()); err != nil {
+		return err
+	}
+	if _, err := setup.ConfigPlan(true); err != nil && !strings.Contains(err.Error(), "already exists") {
+		return err
+	}
+	plan, err := setup.MCPPlan(os.Args[0], true)
+	if err != nil {
+		return err
+	}
+	return printJSON(map[string]any{"action": "install", "model": laya.DefaultModelVersion, "mcp": plan})
 }
 
 func healthCommand(args []string) error {
@@ -352,7 +369,7 @@ func configCommand(args []string) error {
 
 func modelCommand(args []string) error {
 	if len(args) < 1 {
-		return errors.New("model requires status, verify, rollback, or update")
+		return errors.New("model requires status, verify, rollback, update, or recalibrate")
 	}
 	m, err := models.NewManager(filepath.Join(root(), "models"))
 	if err != nil {
@@ -396,6 +413,12 @@ func modelCommand(args []string) error {
 			return err
 		}
 		return printJSON(m.Status())
+	case "recalibrate":
+		report, err := laya.Recalibrate(root())
+		if err != nil {
+			return err
+		}
+		return printJSON(report)
 	default:
 		return errors.New("unknown model command")
 	}

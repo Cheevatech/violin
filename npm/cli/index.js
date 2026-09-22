@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
-const OWNER = process.env.VIOLIN_GITHUB_OWNER || 'film';
+const OWNER = process.env.VIOLIN_GITHUB_OWNER || 'Cheevatech';
 const REPOSITORY = process.env.VIOLIN_GITHUB_REPOSITORY || 'violin';
 const VERSION = process.env.VIOLIN_VERSION || require('../../package.json').version;
 const RELEASE_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----

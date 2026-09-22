@@ -6,6 +6,7 @@ Install the public launcher without installing Go or Python:
 
 ```bash
 npx @cheevatech/violin doctor
+npx @cheevatech/violin install
 npx @cheevatech/violin init --dry-run
 npx @cheevatech/violin init --apply
 npx @cheevatech/violin uninstall --dry-run
@@ -46,6 +47,7 @@ The repository now contains a Go control-plane binary built with `make go-build`
 
 ```bash
 ./bin/violin mcp
+./bin/violin install
 ./bin/violin run --backend auto -C /absolute/workspace --task-file /path/task
 ./bin/violin model status
 ./bin/violin model verify
@@ -54,17 +56,18 @@ The repository now contains a Go control-plane binary built with `make go-build`
 
 The Go binary owns MCP, job lifecycle, evidence descriptors, provider health,
 and model activation.
-The Laya English checkpoint is a separately versioned artifact managed under the
-shared worker state directory. Its manifest must declare `language: "en"`;
+`violin install` also installs the built-in Go Laya inference engine's verified
+English model under the shared worker state directory. Its manifest must declare `language: "en"`;
 multilingual checkpoints are intentionally outside this control-plane contract.
 Activation is atomic and checksum failures leave the current model untouched.
-Set `[laya].runner` to a JSON-argv model runtime and choose `shadow`,
+Set `[laya].runner` only for development adapters and choose `shadow`,
 `advisory`, or `active` in `[laya].mode`. The runtime receives the verified
 active model directory as `VIOLIN_LAYA_MODEL_DIR`; `VIOLIN_LAYA_RUNNER` and
 `VIOLIN_LAYA_MODE` are environment overrides. Shadow and advisory modes record
 decisions without changing backend selection; active mode can change only an
 auto-selected backend after verified model inference succeeds.
-Laya decisions are initially fallback-safe and can
+Run `./bin/violin model recalibrate` to create a metadata-only calibration
+candidate; it never promotes a model automatically. Laya decisions are initially fallback-safe and can
 be rolled out from shadow to advisory to active mode without changing provider
 worker commands. A base Laya checkpoint must not be treated as production
 routing policy until violin has a domain-tuned, calibrated artifact and replay

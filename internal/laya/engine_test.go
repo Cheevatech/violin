@@ -133,3 +133,18 @@ func TestManagedEngineUsesBuiltinVerifiedClassifier(t *testing.T) {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }
+
+func TestEnsureDefaultModelInstallsVerifiedEnglishModel(t *testing.T) {
+	root := t.TempDir()
+	if err := EnsureDefaultModel(root); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := models.NewManager(filepath.Join(root, "models"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := manager.Status()
+	if status.Active != DefaultModelVersion || !status.Verified || status.Manifest.Language != ProtocolLanguage {
+		t.Fatalf("status=%+v", status)
+	}
+}

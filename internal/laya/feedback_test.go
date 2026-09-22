@@ -26,3 +26,17 @@ func TestAppendFeedbackStoresMetadataWithoutTaskText(t *testing.T) {
 		t.Fatalf("feedback permissions=%o", mode)
 	}
 }
+
+func TestRecalibrateWritesCandidateWithoutPromotion(t *testing.T) {
+	root := t.TempDir()
+	if err := AppendFeedback(root, FeedbackEvent{SelectedBackend: "qwen", Outcome: "completed"}); err != nil {
+		t.Fatal(err)
+	}
+	report, err := Recalibrate(root)
+	if err != nil || report.Events != 1 || report.Completed != 1 || report.Promoted {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "calibration-candidate.json")); err != nil {
+		t.Fatal(err)
+	}
+}
