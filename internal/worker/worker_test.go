@@ -97,6 +97,9 @@ func TestRunAPITransportWritesResponsesReport(t *testing.T) {
 	if report["status"] != "completed" || report["summary"] != "native go response" || report["idle_timeout_enabled"] != false {
 		t.Fatalf("unexpected report: %+v", report)
 	}
+	if changed, ok := report["changed_files"].([]any); !ok || changed == nil {
+		t.Fatalf("changed_files must be an array: %#v", report["changed_files"])
+	}
 }
 
 func TestRunCLIReportsIdleTimeoutAfterProviderEvent(t *testing.T) {

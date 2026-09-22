@@ -424,7 +424,7 @@ func changedFiles(workspace string, baseline []string) []string {
 	for _, file := range baseline {
 		before[file] = true
 	}
-	var changed []string
+	changed := []string{}
 	for _, file := range current {
 		if !before[file] {
 			changed = append(changed, file)
