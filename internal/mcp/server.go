@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/film/violin/internal/auth"
+	"github.com/film/violin/internal/credentials"
 	"github.com/film/violin/internal/jobs"
 )
 
@@ -73,6 +76,7 @@ func tools() map[string]any {
 		{"name": "wait_agent", "description": "Wait on an existing agent.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}, "wait_seconds": map[string]any{"type": "integer", "minimum": 0, "maximum": 50}}, []string{"agent_id"})},
 		{"name": "list_agents", "description": "List agent jobs.", "inputSchema": object(map[string]any{}, nil)},
 		{"name": "interrupt_agent", "description": "Interrupt an agent without reverting work.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}}, []string{"agent_id"})},
+		{"name": "auth_status", "description": "Inspect global provider authentication without exposing credentials.", "inputSchema": object(map[string]any{}, nil)},
 	}}
 }
 func call(params map[string]any) (any, error) {
@@ -84,6 +88,8 @@ func call(params map[string]any) (any, error) {
 		root = filepath.Join(home, ".local", "state", "violin-workers")
 	}
 	switch name {
+	case "auth_status":
+		return auth.NewManager(credentials.Default()).AllStatus(context.Background())
 	case "spawn_agent":
 		cwd, _ := args["cwd"].(string)
 		task, _ := args["task"].(string)

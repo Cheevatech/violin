@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -9,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/film/violin/internal/auth"
 	"github.com/film/violin/internal/config"
+	"github.com/film/violin/internal/credentials"
 	"github.com/film/violin/internal/jobs"
 	"github.com/film/violin/internal/mcp"
 	"github.com/film/violin/internal/models"
@@ -33,6 +36,8 @@ func main() {
 		err = installMCP(os.Args[2:])
 	case "skills":
 		err = skillsCommand(os.Args[2:])
+	case "auth":
+		err = authCommand(os.Args[2:])
 	case "run":
 		err = runCommand(os.Args[2:])
 	case "wait":
@@ -56,7 +61,37 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: violin {mcp|init|skills|run|wait|list|interrupt|config|model}")
+	fmt.Fprintln(os.Stderr, "usage: violin {mcp|init|skills|auth|run|wait|list|interrupt|config|model}")
+}
+
+func authCommand(args []string) error {
+	if len(args) < 2 {
+		return errors.New("auth requires status/login and provider")
+	}
+	manager := auth.NewManager(credentials.Default())
+	provider := args[1]
+	if args[0] == "status" {
+		if provider == "all" {
+			result := map[string]any{}
+			for _, name := range []string{"qwen", "agy", "claude"} {
+				status, err := manager.Status(context.Background(), name)
+				if err != nil {
+					return err
+				}
+				result[name] = status
+			}
+			return printJSON(result)
+		}
+		status, err := manager.Status(context.Background(), provider)
+		if err != nil {
+			return err
+		}
+		return printJSON(status)
+	}
+	if args[0] == "login" {
+		return manager.Login(context.Background(), provider)
+	}
+	return errors.New("auth requires status or login")
 }
 
 func installMCP(args []string) error {

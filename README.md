@@ -9,6 +9,9 @@ npx violin doctor
 npx violin init --dry-run
 npx violin init --apply
 npx violin skills install --apply
+npx violin auth status all
+npx violin auth login claude
+npx violin auth login qwen
 ```
 
 The npm launcher downloads a platform-specific Go release binary and verifies
@@ -22,6 +25,12 @@ with offline parser tests and credential lookup. The existing Python worker
 entrypoints remain the compatibility path until the native provider execution
 path completes its MCP/job parity gate; they are not part of the intended final
 release runtime.
+
+Authentication is global to the current OS user, not to a Violin job or
+session. Claude uses `claude auth login`; Qwen uses `codex login`; AGY has no
+CLI login command and must use `VIOLIN_AGY_API_KEY` or the OS keychain. MCP can
+read `auth_status` without exposing credentials. Login is explicit and is not
+started automatically by an MCP request.
 
 The repository now contains a Go control-plane binary built with `make go-build`:
 
