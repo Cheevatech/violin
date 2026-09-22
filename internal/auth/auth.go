@@ -199,5 +199,5 @@ func runCommand(ctx context.Context, command string, args ...string) ([]byte, er
 	}
 	statusCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	return exec.CommandContext(statusCtx, command, args...).Output()
+	return exec.CommandContext(statusCtx, command, args...).CombinedOutput()
 }
