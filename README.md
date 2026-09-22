@@ -189,28 +189,31 @@ provider. A custom model missing from the catalog is `degraded`, not synthetic
 inspect a specific cache file.
 
 Each run contains an atomic `status.json` with only phase, last activity,
-elapsed time, PID, hard-timeout deadline, command type, and evidence directory.
-The supported phases are `starting`, `metadata_check`, `backend_starting`,
-`turn_started`, `reasoning`, `command_started`, `command_completed`,
-`completed`, `failed`, `timeout`, and `interrupted`. `wait_agent` returns this
-snapshot, including phase and evidence, when its wait interval expires. The
-worker idle timeout defaults to 300 seconds and measures time since the last
-event or heartbeat; configure it with `--idle-timeout` or
-`idle_timeout_seconds` on `spawn_agent`. Built-in Qwen and AGY adapters do not
-apply idle timeout because their provider progress streams are not reliable;
-they rely on the hard task timeout instead of falsely treating normal
-reasoning time as idle. Custom commands still use idle timeout, and a
-recognized Qwen command-execution item keeps the worker alive until completion.
+elapsed time, PID, evidence directory, effective timeout policy, heartbeat
+timestamps, and event count. The current lifecycle states are `starting`,
+`progressing`, `reasoning`, `stalled`, `completed`, `failed`, and
+`interrupted`. `wait_agent` returns this snapshot, including supervisor state
+and evidence, when its wait interval expires. The worker idle timeout defaults
+to 300 seconds and measures time since the last event or heartbeat; configure
+it with `--idle-timeout` or `idle_timeout_seconds` on `spawn_agent`. Built-in
+Qwen and AGY adapters do not apply idle timeout because their provider progress
+streams are not reliable; they rely on the hard task timeout instead of
+falsely treating normal reasoning time as idle. Custom commands still use idle
+timeout.
 
-When a run stops, inspect `report.json`, `status.json`, `metadata.json`,
-`process.json`, `stdout.log`, and `stderr.log` under the reported evidence path.
-`metadata_unavailable`, `qwen_unhealthy`, `provider_error`,
-`empty_final_response`, `idle_timeout`, `timeout`, `no_changes`, and
-`interrupted` identify different failure causes. A worker
-PID is recorded in `process.json`; the long-running `violin-agent-server` has a
-different parent process and owns the MCP stdio pipe. The investigated incident
-occurred after a successful shell command during turn progression, which is why
-command completion and later silence are tracked separately.
+The Go MCP server also exposes Laya tools in the same server: `laya_route`,
+`laya_review_risk`, `laya_check_job`, `laya_wait_job`, and
+`laya_explain_decision`. These are read-only/advisory in the current release;
+`laya_wait_job` lets the caller wait once instead of repeatedly polling the
+worker. They reuse Violin's existing job descriptors, evidence, supervisor,
+and verified English model; there is no separate Laya MCP server.
+
+When a run stops, inspect `report.json`, `status.json`, `task.txt`,
+`output.json`, `stdout.log`, and `stderr.log` under the reported evidence path.
+`provider_error`, `idle_timeout`, `timeout`, and `interrupted` identify common
+failure causes. The descriptor persists the worker PID and lease so a new Go
+MCP process can recover jobs while the process is still alive; completed jobs
+are finalized from their report and their descriptor is cleaned up.
 
 Qwen currently reports zero usage through this gateway; that is missing metering,
 not proof of zero tokens. No percentage of Codex token savings is claimed.

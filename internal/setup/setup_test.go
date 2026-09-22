@@ -63,6 +63,25 @@ func TestConfigPlanCreatesCredentialFreeTemplate(t *testing.T) {
 	}
 }
 
+func TestEmbeddedSkillsDescribeCurrentGoMCPAndLayaContract(t *testing.T) {
+	checks := map[string][]string{
+		"assets/violin-implement/SKILL.md": {"Go-owned", "laya_route", "laya_wait_job"},
+		"assets/violin-review/SKILL.md":    {"supervisor heartbeat", "laya_wait_job", "explicit caller timeouts"},
+		"assets/violin-security/SKILL.md":  {"read-only/advisory", "arbitrary shell", "checksum"},
+	}
+	for path, markers := range checks {
+		data, err := bundledSkills.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read embedded skill %s: %v", path, err)
+		}
+		for _, marker := range markers {
+			if !strings.Contains(string(data), marker) {
+				t.Errorf("embedded skill %s missing marker %q", path, marker)
+			}
+		}
+	}
+}
+
 func containsCredentialMarker(value string) bool {
 	for _, marker := range []string{"API_KEY =", "BEGIN PRIVATE KEY", "LLMUX_API_KEY ="} {
 		if strings.Contains(value, marker) {
