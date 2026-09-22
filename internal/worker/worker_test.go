@@ -47,6 +47,12 @@ func TestParseWorkerArgsIncludesIdleTimeout(t *testing.T) {
 	}
 }
 
+func TestCommandPartsAcceptsLegacyConfiguredCommand(t *testing.T) {
+	if got := commandParts([]any{"fake-agent", "--json"}); len(got) != 2 || got[0] != "fake-agent" {
+		t.Fatalf("got=%v", got)
+	}
+}
+
 func TestRunAPITransportWritesResponsesReport(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/v1/responses" || request.Header.Get("Authorization") != "Bearer test-key" {

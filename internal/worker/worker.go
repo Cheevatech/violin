@@ -76,7 +76,11 @@ func Run(ctx context.Context, options Options) error {
 	writeStatus("running", options, started)
 	var text string
 	var usage any
-	if backend.Transport == "api" || (backend.Transport == "auto" && len(backend.CLI.Command) == 0) {
+	cliCommand := backend.CLI.Command
+	if len(cliCommand) == 0 {
+		cliCommand = commandParts(backend.Command)
+	}
+	if backend.Transport == "api" || (backend.Transport == "auto" && len(cliCommand) == 0) {
 		provider, err := providers.FromConfigProvider(ctx, settings, credentials.Default(), options.Backend)
 		if err != nil {
 			return writeFailure(options, started, err)
@@ -87,7 +91,7 @@ func Run(ctx context.Context, options Options) error {
 		}
 		text, usage = result.Text, result.Usage
 	} else {
-		text, err = runCLI(ctx, backend.CLI.Command, string(task), options)
+		text, err = runCLI(ctx, cliCommand, string(task), options)
 		if err != nil {
 			return writeFailure(options, started, err)
 		}
@@ -97,6 +101,23 @@ func Run(ctx context.Context, options Options) error {
 	}
 	writeStatus("completed", options, started)
 	return writeReport(options, started, "completed", 0, text, usage, "")
+}
+
+func commandParts(value any) []string {
+	switch typed := value.(type) {
+	case string:
+		return strings.Fields(typed)
+	case []string:
+		return typed
+	case []any:
+		result := make([]string, 0, len(typed))
+		for _, item := range typed {
+			result = append(result, fmt.Sprint(item))
+		}
+		return result
+	default:
+		return nil
+	}
 }
 
 func runCLI(parent context.Context, command []string, task string, options Options) (string, error) {

@@ -148,7 +148,7 @@ func Spawn(o Options) (*Job, error) {
 	outputPath := filepath.Join(run, "output.json")
 	statusPath := filepath.Join(run, "status.json")
 	worker := os.Getenv("VIOLIN_WORKER_BIN")
-	native := cfg.Backend[o.Backend].Transport != "" && cfg.Backend[o.Backend].Command == nil
+	native := cfg.Backend[o.Backend].Transport != "" || cfg.Backend[o.Backend].Command != nil || len(cfg.Backend[o.Backend].CLI.Command) > 0
 	workerArgs := []string{o.Backend, "--mode", o.Mode, "-C", o.Workspace, "--task-file", taskPath, "--timeout", strconv.Itoa(o.Timeout), "--idle-timeout", strconv.Itoa(o.IdleTimeout)}
 	if native {
 		worker = os.Args[0]
