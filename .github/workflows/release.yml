@@ -26,9 +26,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
       - uses: actions/setup-go@v5
         with:
           go-version: '1.27.x'
+      - name: Verify release version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: test "$(node -p "require('./package.json').version")" = "$RELEASE_VERSION"
       - name: Build release binary
         env:
           GOOS: ${{ matrix.goos }}
@@ -45,10 +52,18 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
       - uses: actions/download-artifact@v4
         with:
           path: release
           merge-multiple: true
+      - name: Verify release version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: test "$(node -p "require('./package.json').version")" = "$RELEASE_VERSION"
       - name: Generate checksum manifest
         env:
           VERSION: ${{ inputs.version }}
@@ -86,3 +101,22 @@ jobs:
         with:
           tag_name: v${{ inputs.version }}
           files: release/*
+
+  publish-npm:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Verify release version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: test "$(node -p "require('./package.json').version")" = "$RELEASE_VERSION"
+      - run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
