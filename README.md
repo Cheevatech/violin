@@ -49,7 +49,27 @@ Use `--session-id NAME` or `VIOLIN_SESSION_ID` when separate CLI invocations
 should share one per-session limit.
 
 `VIOLIN_WORKER_RUNS` overrides the shared lease/evidence location. Default
-timeout is 900 seconds; `--timeout` changes it.
+timeouts are selected by mode: 900 seconds for `inspect` and 3600 seconds for
+`implement`. `timeout_seconds` on MCP or `--timeout` on the CLI overrides the
+default, subject to the configured maximum (14,400 seconds by default). The
+effective timeout and its source are returned in the live response and stored
+in the worker report.
+
+Timeout policy can be changed without editing the launcher:
+
+```toml
+[timeouts]
+max_seconds = 14400
+
+[timeouts.defaults]
+inspect = 900
+implement = 3600
+```
+
+The equivalent environment overrides are
+`VIOLIN_TIMEOUT_MAX_SECONDS`, `VIOLIN_INSPECT_TIMEOUT_SECONDS`, and
+`VIOLIN_IMPLEMENT_TIMEOUT_SECONDS`. Built-in Qwen and AGY still use the hard
+timeout only; custom commands retain idle-timeout protection.
 
 Backend commands can be replaced in the config with an argv list or a
 shell-like string parsed without a shell. A config-file `command` is always

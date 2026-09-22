@@ -9,7 +9,8 @@ import sys
 import tempfile
 import time
 import uuid
-from violin_scheduler import Scheduler, load_config, run_custom_health, worker_environment
+from violin_scheduler import (Scheduler, load_config, resolve_timeout,
+                               run_custom_health, worker_environment)
 
 RUNNER = Path(__file__).resolve().with_name("violin-worker")
 HEALTH = Path(__file__).resolve().with_name("violin-health")
@@ -54,6 +55,9 @@ def public_response(report, requested_backend=None, selected_backend=None,
         "evidence": report.get("evidence"),
         "supervisor_review_required": report.get("supervisor_review_required", True),
     }
+    for key in ("effective_timeout_seconds", "timeout_source", "idle_timeout_enabled"):
+        if key in report:
+            result[key] = report[key]
     if result["status"] == "running":
         for key in ("last_event_at", "elapsed_seconds"):
             if key in report:
@@ -95,7 +99,10 @@ def qwen_health(config):
 def snapshot(job):
     code = job["process"].poll()
     result = {"agent_id": job["id"], "backend": job["backend"],
-              "status": "running" if code is None else "failed"}
+              "status": "running" if code is None else "failed",
+              "effective_timeout_seconds": job.get("effective_timeout_seconds"),
+              "timeout_source": job.get("timeout_source"),
+              "idle_timeout_enabled": job.get("idle_timeout_enabled")}
     try:
         live = json.loads(job["status"].read_text())
         result.update({key: live[key] for key in
@@ -125,14 +132,12 @@ def dispatch(name, args):
             raise ValueError("A nonempty task is required")
         if not cwd.is_absolute() or not cwd.is_dir():
             raise ValueError("cwd must be an existing absolute directory")
-        timeout = args.get("timeout_seconds", 900)
-        if type(timeout) is not int or not 1 <= timeout <= 3600:
-            raise ValueError("timeout_seconds must be between 1 and 3600")
+        config = load_config()
+        timeout, timeout_source = resolve_timeout(config, mode, args.get("timeout_seconds"))
         idle_timeout = args.get("idle_timeout_seconds", 300)
         if type(idle_timeout) is not int or not 1 <= idle_timeout <= 3600:
             raise ValueError("idle_timeout_seconds must be between 1 and 3600")
         root = Path(os.environ.get("VIOLIN_WORKER_RUNS", str(Path.home() / ".local/state/violin-workers")))
-        config = load_config()
         scheduler = Scheduler(root, config, session_id=str(os.getpid()))
         health_failed, health_evidence, unavailable = False, None, set()
         lease = counts = quota = reason = None
@@ -181,13 +186,18 @@ def dispatch(name, args):
         job = {"id": agent_id, "backend": backend, "process": proc, "output": output,
                "status": directory / "status.json", "lease": lease,
                "requested_backend": requested_backend, "capacity_snapshot": counts,
-               "quota": quota, "fallback_reason": ("qwen_health_failed" if health_failed else reason)}
+               "quota": quota, "fallback_reason": ("qwen_health_failed" if health_failed else reason),
+               "effective_timeout_seconds": timeout, "timeout_source": timeout_source,
+               "idle_timeout_enabled": not (backend in ("agy", "qwen") and
+                                             not config.get("custom_commands", {}).get(backend, False))}
         if health_evidence is not None:
             job["health_evidence"] = health_evidence
         JOBS[agent_id] = job
         result = snapshot(job)
         result.update({"requested_backend": requested_backend, "selected_backend": backend,
-                       "capacity_snapshot": counts, "quotas": quota})
+                       "capacity_snapshot": counts, "quotas": quota,
+                       "effective_timeout_seconds": timeout, "timeout_source": timeout_source,
+                       "idle_timeout_enabled": job["idle_timeout_enabled"]})
         if requested_backend == "auto" and (reason or health_failed):
             result["fallback_reason"] = ("qwen_health_failed" if health_failed else reason)
             if health_failed:
@@ -243,11 +253,11 @@ def schema(properties, required=()):
 
 
 TOOLS = [
-    {"name": "spawn_agent", "description": "Delegate a bounded task to AGY, self-hosted Qwen, or Claude Code. Auto prefers AGY, then Qwen, then Claude when capacity or Qwen health prevents earlier choices. Returns a bounded live status/report; full details remain in evidence. If summary_truncated=true, open the report/log there when needed. Codex retains final review. Send only necessary task/context, scope and acceptance criteria; use inspect unless edits are authorized.",
+    {"name": "spawn_agent", "description": "Delegate a bounded task to AGY, self-hosted Qwen, or Claude Code. Auto prefers AGY, then Qwen, then Claude when capacity or Qwen health prevents earlier choices. Timeout defaults are selected by mode (inspect/implement) from config; timeout_seconds is an optional override. Built-in Qwen and AGY use hard timeout without idle timeout. Returns a bounded live status/report; full details remain in evidence. If summary_truncated=true, open the report/log there when needed. Codex retains final review. Send only necessary task/context, scope and acceptance criteria; use inspect unless edits are authorized.",
      "inputSchema": schema({"backend": {"type": "string", "enum": ["auto", "agy", "qwen", "claude"]},
         "task": {"type": "string"}, "cwd": {"type": "string"},
         "mode": {"type": "string", "enum": ["inspect", "implement"]},
-        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "timeout_seconds": {"type": "integer", "minimum": 1},
         "idle_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600}}, ["task", "cwd"])},
     {"name": "wait_agent", "description": "Wait up to 50 seconds (default) on the same external agent id. Prefer a full wait to reduce supervisor token overhead. Returns a bounded summary; full details remain in evidence. If summary_truncated=true, open the report/log there when needed. Running is not failure; never restart just because this wait expires.",
      "inputSchema": schema({"agent_id": {"type": "string"}, "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 50}}, ["agent_id"])},

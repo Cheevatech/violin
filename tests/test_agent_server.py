@@ -82,6 +82,18 @@ print(json.dumps({"type": "result", "subtype": "success", "result": "claude fixt
         self.assertEqual(result["requested_backend"], "auto")
         self.assertEqual(result["selected_backend"], "agy")
         self.assertTrue(result["supervisor_review_required"])
+        self.assertEqual(result["effective_timeout_seconds"], 900)
+        self.assertEqual(result["timeout_source"], "default:inspect")
+        self.assertFalse(result["idle_timeout_enabled"])
+
+    def test_implement_uses_longer_default_timeout_without_override(self):
+        job = self.tool("spawn_agent", {"backend": "agy", "cwd": str(self.root),
+                                         "task": "Read fixture", "mode": "implement"})
+        self.assertEqual(job["effective_timeout_seconds"], 3600)
+        self.assertEqual(job["timeout_source"], "default:implement")
+        self.assertFalse(job["idle_timeout_enabled"])
+        result = self.tool("wait_agent", {"agent_id": job["agent_id"], "wait_seconds": 5})
+        self.assertEqual(result["effective_timeout_seconds"], 3600)
 
     def test_auto_round_robin_skips_full_backends(self):
         jobs = [self.tool("spawn_agent", {"cwd":str(self.root),"task":"SLOW_TEST"}) for _ in range(5)]

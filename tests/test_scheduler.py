@@ -93,6 +93,33 @@ command = "/custom/claude"
             self.assertEqual(config["limits"]["claude"], 3)
             self.assertEqual(config["commands"]["claude"], "/custom/claude")
 
+    def test_timeout_policy_defaults_and_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text("""[timeouts]
+max_seconds = 7200
+
+[timeouts.defaults]
+inspect = 600
+implement = 5400
+""")
+            config = violin_scheduler.load_config(path)
+            self.assertEqual(violin_scheduler.resolve_timeout(config, "inspect"), (600, "default:inspect"))
+            self.assertEqual(violin_scheduler.resolve_timeout(config, "implement", 700), (700, "request"))
+            self.assertEqual(violin_scheduler.config_view(config)["timeouts"]["max_seconds"], 7200)
+
+    def test_timeout_policy_rejects_default_above_maximum(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text("""[timeouts]
+max_seconds = 100
+
+[timeouts.defaults]
+implement = 101
+""")
+            with self.assertRaisesRegex(ValueError, "must not exceed"):
+                violin_scheduler.load_config(path)
+
     def test_config_command_is_always_custom_even_without_arguments(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"

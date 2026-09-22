@@ -11,7 +11,8 @@ import tempfile
 import time
 import uuid
 
-from violin_scheduler import BACKENDS, Scheduler, config_view, load_config, run_custom_health, worker_environment
+from violin_scheduler import (BACKENDS, Scheduler, config_view, load_config,
+                              resolve_timeout, run_custom_health, worker_environment)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -91,6 +92,7 @@ def spawn(args):
         raise SystemExit(json.dumps({"error": reason or "capacity_full", "counts": counts or {},
                                      "quotas": quota or {}}, ensure_ascii=False))
     backend = json.loads(lease.read_text())["backend"]
+    timeout, timeout_source = resolve_timeout(config, args.mode, args.timeout)
     directory = Path(tempfile.mkdtemp(prefix="cli-agent-", dir=root))
     taskfile = directory / "task.txt"
     taskfile.write_text(args.task if args.task is not None else Path(args.task_file).read_text())
@@ -100,7 +102,7 @@ def spawn(args):
                                   "last_event_at": time.time(), "elapsed_seconds": 0}))
     env = worker_environment(dict(os.environ, VIOLIN_WORKER_STATUS=str(status)), config)
     proc = subprocess.Popen([str(RUNNER), backend, "--mode", args.mode, "-C", str(Path(args.cwd).resolve()),
-                             "--task-file", str(taskfile), "--timeout", str(args.timeout),
+                             "--task-file", str(taskfile), "--timeout", str(timeout),
                              "--idle-timeout", str(args.idle_timeout)], stdin=subprocess.DEVNULL,
                             stdout=output.open("w"), stderr=(directory / "stderr.log").open("w"),
                             env=env, start_new_session=True)
@@ -110,7 +112,8 @@ def spawn(args):
     write_job(record, {"agent_id": agent_id, "backend": backend, "pid": proc.pid,
                        "lease": str(lease), "output": str(output), "evidence": str(directory),
                        "record": str(record), "requested_backend": args.backend,
-                       "created_at": time.time()})
+                       "created_at": time.time(), "effective_timeout_seconds": timeout,
+                       "timeout_source": timeout_source})
     if args.background:
         print(json.dumps({"agent_id": agent_id, "status": "running", "selected_backend": backend,
                           "requested_backend": args.backend, "evidence": str(directory)}, ensure_ascii=False))
@@ -206,7 +209,7 @@ def main():
     source.add_argument("--task")
     source.add_argument("--task-file")
     run.add_argument("--mode", choices=["inspect", "implement"], default="inspect")
-    run.add_argument("--timeout", type=int, default=900)
+    run.add_argument("--timeout", type=int)
     run.add_argument("--idle-timeout", type=int, default=300)
     run.add_argument("--background", action="store_true")
     sub.add_parser("list")

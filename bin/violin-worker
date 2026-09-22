@@ -96,11 +96,17 @@ def health(run, deadline):
     if p.returncode != 0: return value, "qwen_unhealthy"
     return value, None
 
-def make_report(status, backend, code, run, started, activity, metadata, metadata_status, smoke_status, final, changed, diff, error=None, usage=None, summary="", summary_chars=6000):
+def make_report(status, backend, code, run, started, activity, metadata, metadata_status, smoke_status, final, changed, diff, error=None, usage=None, summary="", summary_chars=6000, timeout_seconds=None, idle_timeout_seconds=None, idle_timeout_enabled=None):
     try: phase = json.loads(activity.path.read_text()).get("phase")
     except (OSError, ValueError): phase = "failed"
     report = {"status":status, "backend":backend, "exit_code":code, "duration_seconds":round(time.monotonic()-started,2), "evidence":str(run), "phase":phase, "metadata":metadata, "metadata_status":metadata_status, "smoke_status":smoke_status, "usage":usage, "summary":summary[:summary_chars], "summary_truncated":len(summary)>summary_chars, "supervisor_review_required":True, "final_message_seen":final, "changed_files":changed, "git_diff_check":diff}
     if error: report["error_message"] = error
+    if timeout_seconds is not None:
+        report["effective_timeout_seconds"] = timeout_seconds
+    if idle_timeout_seconds is not None:
+        report["idle_timeout_seconds"] = idle_timeout_seconds
+    if idle_timeout_enabled is not None:
+        report["idle_timeout_enabled"] = idle_timeout_enabled
     if status in ("provider_error", "qwen_unhealthy", "invalid_json", "empty_final_response") or (error and status == "failed"):
         report["failure_reason"] = "provider_error" if status == "provider_error" else status
     return report
@@ -115,10 +121,11 @@ def main():
     activity=Activity(Path(os.environ.get("VIOLIN_WORKER_STATUS",str(run/"status.json"))),time.time()+a.timeout); activity.write(); metadata=None; metadata_status="not_applicable"; smoke_status="not_applicable"
     custom = os.environ.get(f"VIOLIN_{a.backend.upper()}_CUSTOM") == "1"
     protocol = os.environ.get(f"VIOLIN_{a.backend.upper()}_PROTOCOL", a.backend)
+    idle_timeout_enabled = not (not custom and protocol in ("agy", "qwen"))
     if a.backend=="qwen" and not custom:
         metadata,failure=health(run,deadline); metadata_status=metadata.get("metadata_status","unavailable"); smoke_status=metadata.get("smoke_status","not_run")
         if failure:
-            report=make_report(failure,a.backend,None,run,started,activity,metadata,metadata_status,smoke_status,False,[],{},metadata.get("error")); atomic_json(run/"report.json",report); print(json.dumps(report,ensure_ascii=False)); return 1
+            report=make_report(failure,a.backend,None,run,started,activity,metadata,metadata_status,smoke_status,False,[],{},metadata.get("error"), timeout_seconds=a.timeout, idle_timeout_seconds=a.idle_timeout, idle_timeout_enabled=idle_timeout_enabled); atomic_json(run/"report.json",report); print(json.dumps(report,ensure_ascii=False)); return 1
     baseline_code,baseline=git_state(cwd); policy="Inspect only; do not change files." if a.mode=="inspect" else "Change only the assigned scope. Inspect the resulting diff and run relevant validation."
     prompt=f"""You are a delegated worker. Codex is the supervisor and makes final decisions.
 Assigned workspace (absolute path): {cwd}
@@ -132,7 +139,7 @@ Task:
         cmd=command(a.backend,a.mode,cwd,result,a.timeout,prompt,run/"task.txt")
     except (OSError, ValueError) as exc:
         activity.event("failed")
-        report=make_report("failed",a.backend,None,run,started,activity,metadata,metadata_status,smoke_status,False,[],{},str(exc),None,"",a.summary_chars)
+        report=make_report("failed",a.backend,None,run,started,activity,metadata,metadata_status,smoke_status,False,[],{},str(exc),None,"",a.summary_chars, a.timeout, a.idle_timeout, idle_timeout_enabled)
         report["failure_reason"]="config_error"
         atomic_json(run/"report.json",report); print(json.dumps(report,ensure_ascii=False)); return 1
     proc=None; done=threading.Event(); state={"text":[],"raw":[],"error":None,"terminal":False,"terminal_status":None,"usage":None}; status="failed"; code=None
@@ -183,7 +190,6 @@ Task:
             if (protocol == "qwen" and not custom) or send_stdin:
                 proc.stdin.write(prompt)
             proc.stdin.close()
-            idle_timeout_enabled = not (not custom and protocol in ("agy", "qwen"))
             while proc.poll() is None:
                 if time.monotonic()>=deadline: status="timeout"; activity.event("timeout"); terminate(proc); break
                 if (idle_timeout_enabled and not activity.command_active and
@@ -249,7 +255,7 @@ Task:
     if protocol in ("qwen", "claude") and status=="completed" and (not state["terminal"] or state["terminal_status"] in ("failed","incomplete","error_during_execution") or not final): status="empty_final_response" if not final else "provider_error"
     after_code,after=git_state(cwd); changed=changed_paths(baseline,after,cwd,root.resolve()); diff={"before_status_exit":baseline_code,"after_status_exit":after_code,"new_changed_files":changed}
     if a.mode=="implement" and status=="completed" and not changed: status="no_changes"
-    report=make_report(status,a.backend,code,run,started,activity,metadata,metadata_status,smoke_status,final,changed,diff,state["error"],state["usage"],message,a.summary_chars)
+    report=make_report(status,a.backend,code,run,started,activity,metadata,metadata_status,smoke_status,final,changed,diff,state["error"],state["usage"],message,a.summary_chars, a.timeout, a.idle_timeout, idle_timeout_enabled)
     if protocol == "claude" and not custom: report["claude_model"] = "claude-sonnet-5"
     if protocol == "claude" and state.get("credential_error"):
         report["credential_error"] = state["credential_error"][:a.summary_chars]

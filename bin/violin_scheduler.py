@@ -22,6 +22,7 @@ DEFAULTS = {
     "health_commands": {},
     "protocols": {"agy": "agy", "qwen": "qwen", "claude": "claude"},
     "stdin": {"agy": False, "qwen": True, "claude": False},
+    "timeouts": {"max_seconds": 14400, "defaults": {"inspect": 900, "implement": 3600}},
 }
 
 
@@ -44,6 +45,8 @@ def _normalise(value):
     result["health_commands"] = {}
     result["protocols"] = dict(DEFAULTS["protocols"])
     result["stdin"] = dict(DEFAULTS["stdin"])
+    result["timeouts"] = {"max_seconds": DEFAULTS["timeouts"]["max_seconds"],
+                           "defaults": dict(DEFAULTS["timeouts"]["defaults"])}
     if isinstance(value, dict):
         scheduler = value.get("scheduler", value)
         if isinstance(scheduler, dict):
@@ -81,6 +84,15 @@ def _normalise(value):
                         result["protocols"][backend] = str(item["protocol"])
                     if "stdin" in item:
                         result["stdin"][backend] = bool(item["stdin"])
+        timeouts = value.get("timeouts", {})
+        if isinstance(timeouts, dict):
+            result["timeouts"]["max_seconds"] = _int(
+                timeouts.get("max_seconds"), result["timeouts"]["max_seconds"], 1)
+            defaults = timeouts.get("defaults", {})
+            if isinstance(defaults, dict):
+                for mode in ("inspect", "implement"):
+                    result["timeouts"]["defaults"][mode] = _int(
+                        defaults.get(mode), result["timeouts"]["defaults"][mode], 1)
     if not result["order"]:
         result["order"] = list(BACKENDS)
     return result
@@ -104,6 +116,12 @@ def load_config(path=None):
         os.environ.get("VIOLIN_SESSION_MAX_CONCURRENCY"), result["session_max_concurrency"])
     result["machine_max_concurrency"] = _int(
         os.environ.get("VIOLIN_MACHINE_MAX_CONCURRENCY"), result["machine_max_concurrency"])
+    result["timeouts"]["max_seconds"] = _int(
+        os.environ.get("VIOLIN_TIMEOUT_MAX_SECONDS"), result["timeouts"]["max_seconds"], 1)
+    for mode in ("inspect", "implement"):
+        result["timeouts"]["defaults"][mode] = _int(
+            os.environ.get(f"VIOLIN_{mode.upper()}_TIMEOUT_SECONDS"),
+            result["timeouts"]["defaults"][mode], 1)
     for backend in BACKENDS:
         result["limits"][backend] = _int(
             os.environ.get(f"VIOLIN_{backend.upper()}_MAX_CONCURRENCY"), result["limits"][backend])
@@ -136,6 +154,9 @@ def load_config(path=None):
         raise ValueError("scheduler.strategy must be round_robin")
     if not result["order"]:
         raise ValueError("scheduler.order must contain at least one supported backend")
+    if any(value > result["timeouts"]["max_seconds"]
+           for value in result["timeouts"]["defaults"].values()):
+        raise ValueError("timeouts.defaults must not exceed timeouts.max_seconds")
     for backend in BACKENDS:
         protocol = result["protocols"][backend]
         if protocol not in SUPPORTED_PROTOCOLS:
@@ -172,7 +193,19 @@ def config_view(config):
                    "stdin": config["stdin"][name]}
             for name in BACKENDS
         },
+        "timeouts": config["timeouts"],
     }
+
+
+def resolve_timeout(config, mode, requested=None):
+    """Return (seconds, source) for a server/CLI job timeout."""
+    policy = config["timeouts"]
+    maximum = policy["max_seconds"]
+    if requested is not None:
+        if type(requested) is not int or not 1 <= requested <= maximum:
+            raise ValueError(f"timeout_seconds must be between 1 and {maximum}")
+        return requested, "request"
+    return policy["defaults"][mode], f"default:{mode}"
 
 
 def run_custom_health(config, backend, timeout=45):
