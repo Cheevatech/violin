@@ -21,6 +21,8 @@ var bundledSkills embed.FS
 const (
 	startMarker = "# BEGIN VIOLIN MANAGED MCP"
 	endMarker   = "# END VIOLIN MANAGED MCP"
+	configStart = "# BEGIN VIOLIN CONFIG"
+	configEnd   = "# END VIOLIN CONFIG"
 )
 
 type Plan struct {
@@ -82,6 +84,70 @@ func MCPRollbackPlan(backup string, apply bool) (Plan, error) {
 	plan.Backup = createdBackup
 	return plan, nil
 }
+
+func ConfigPlan(apply bool) (Plan, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return Plan{}, err
+	}
+	target := filepath.Join(home, ".config", "violin", "config.toml")
+	if _, err := os.Stat(target); err == nil {
+		return Plan{}, errors.New("Violin config already exists; refusing to overwrite it")
+	} else if !os.IsNotExist(err) {
+		return Plan{}, err
+	}
+	data := []byte(configTemplate)
+	plan := Plan{Action: "config_init", Target: target, Apply: apply, Changes: fmt.Sprintf("create %d bytes", len(data))}
+	if !apply {
+		return plan, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
+		return Plan{}, err
+	}
+	if err := os.WriteFile(target, data, 0600); err != nil {
+		return Plan{}, err
+	}
+	return plan, nil
+}
+
+const configTemplate = configStart + `
+# Public policy only. Keep API keys in environment variables or the OS keychain.
+
+[scheduler]
+strategy = "round_robin"
+order = ["agy", "qwen", "claude"]
+session_max_concurrency = 10
+machine_max_concurrency = 13
+
+[timeouts]
+max_seconds = 14400
+
+[timeouts.defaults]
+inspect = 900
+implement = 3600
+
+# Configure one or more providers explicitly. Examples:
+# [backend.qwen]
+# transport = "cli"
+# [backend.qwen.cli]
+# command = ["your-qwen-cli", "--task-file", "{task_file}"]
+# status_command = ["your-qwen-cli", "auth", "status"]
+# login_command = ["your-qwen-cli", "auth", "login"]
+#
+# [backend.agy]
+# transport = "api"
+# [backend.agy.api]
+# base_url = "https://generativelanguage.googleapis.com"
+# model = "gemini-2.5-flash"
+# api_key_env = "VIOLIN_AGY_API_KEY"
+#
+# [backend.claude]
+# transport = "cli"
+# [backend.claude.cli]
+# command = ["claude", "--print", "{task}"]
+# status_command = ["claude", "auth", "status", "--json"]
+# login_command = ["claude", "auth", "login"]
+` + configEnd + "\n"
 
 func SkillsPlan(sourceDir string, apply bool) (Plan, error) {
 	home, err := os.UserHomeDir()

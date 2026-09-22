@@ -301,8 +301,24 @@ func interruptCommand(args []string) error {
 }
 
 func configCommand(args []string) error {
+	if len(args) > 0 && args[0] == "init" {
+		apply := false
+		for _, arg := range args[1:] {
+			if arg == "--apply" {
+				apply = true
+			}
+			if arg == "--dry-run" {
+				apply = false
+			}
+		}
+		plan, err := setup.ConfigPlan(apply)
+		if err != nil {
+			return err
+		}
+		return printJSON(plan)
+	}
 	if len(args) != 1 || (args[0] != "show" && args[0] != "validate") {
-		return errors.New("config requires show or validate")
+		return errors.New("config requires init, show, or validate")
 	}
 	c, err := config.Load("")
 	if err != nil {
