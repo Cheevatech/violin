@@ -97,7 +97,7 @@ func Spawn(o Options) (*Job, error) {
 	if layaMode == "" {
 		layaMode = "shadow"
 	}
-	decision := evaluateDecision(o.Root, o.Task, o.Mode, o.Backend, cfg)
+	decision := EvaluateLaya(o.Root, o.Task, o.Mode, o.Backend, cfg)
 	if o.Backend == "auto" {
 		order := cfg.Scheduler.Order
 		if len(order) == 0 {
@@ -545,7 +545,7 @@ func workerEnv(cfg config.Config, backend, statusPath, root, timeoutSource strin
 	return env
 }
 
-func evaluateDecision(root, task, mode, requested string, cfg config.Config) laya.Result {
+func EvaluateLaya(root, task, mode, requested string, cfg config.Config) laya.Result {
 	manager, err := models.NewManager(filepath.Join(root, "models"))
 	if err != nil {
 		return laya.Result{Fallback: true, Error: err.Error()}
