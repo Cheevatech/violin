@@ -148,6 +148,7 @@ func authCommand(args []string) error {
 
 func installMCP(args []string) error {
 	apply := false
+	rollback := ""
 	for _, arg := range args {
 		if arg == "--apply" {
 			apply = true
@@ -155,6 +156,18 @@ func installMCP(args []string) error {
 		if arg == "--dry-run" {
 			apply = false
 		}
+	}
+	for index, arg := range args {
+		if arg == "--rollback" && index+1 < len(args) {
+			rollback = args[index+1]
+		}
+	}
+	if rollback != "" {
+		plan, err := setup.MCPRollbackPlan(rollback, apply)
+		if err != nil {
+			return err
+		}
+		return printJSON(plan)
 	}
 	binary, err := os.Executable()
 	if err != nil {

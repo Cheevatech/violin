@@ -57,6 +57,32 @@ func MCPPlan(binary string, apply bool) (Plan, error) {
 	return planning, nil
 }
 
+func MCPRollbackPlan(backup string, apply bool) (Plan, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return Plan{}, err
+	}
+	target := filepath.Join(home, ".codex", "config.toml")
+	data, err := os.ReadFile(backup)
+	if err != nil {
+		return Plan{}, err
+	}
+	current, err := os.ReadFile(target)
+	if err != nil && !os.IsNotExist(err) {
+		return Plan{}, err
+	}
+	plan := Plan{Action: "mcp_rollback", Target: target, Apply: apply, Changes: diffSummary(string(current), string(data)), Backup: backup}
+	if !apply {
+		return plan, nil
+	}
+	createdBackup, err := writeBackupAndAtomic(target, data)
+	if err != nil {
+		return Plan{}, err
+	}
+	plan.Backup = createdBackup
+	return plan, nil
+}
+
 func SkillsPlan(sourceDir string, apply bool) (Plan, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
