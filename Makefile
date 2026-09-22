@@ -1,9 +1,12 @@
-.PHONY: test go-test go-build vet verify eval release-check smoke tool-smoke
+.PHONY: test go-test go-build npm-test vet verify eval release-check smoke tool-smoke
 
 test:
 	sh -n bin/qwen-mode bin/qwen-verify-gate bin/violin-codex-qwen eval/run-smoke-tests eval/run-tool-smoke-tests
 	python3 -m unittest discover -s tests
 	go test ./...
+
+npm-test:
+	npm test
 
 go-test:
 	go test ./...
@@ -21,6 +24,7 @@ verify: test vet
 eval: smoke tool-smoke
 
 release-check: verify
+	npm test
 	git diff --check
 	git status --short
 

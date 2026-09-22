@@ -1,0 +1,30 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.secret
+.claude/settings.local.json
+
+# Runtime state, logs, caches, and generated reports
+.violin/
+graphify-out/
+bin/__pycache__/
+tests/__pycache__/
+*.log
+
+# Local builds and release artifacts
+bin/violin
+dist/
+release/
+npm/*/dist/
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
+
+# Go tooling
+vendor/

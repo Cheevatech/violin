@@ -1,0 +1,26 @@
+{
+  "name": "violin",
+  "version": "0.1.0",
+  "description": "Go-native AI agent control plane with MCP and managed Laya policy",
+  "bin": {
+    "violin": "npm/cli/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "npm/cli",
+    "release-public-key.pem"
+  ],
+  "scripts": {
+    "test": "node --test npm/cli/*.test.js"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/film/violin.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

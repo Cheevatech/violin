@@ -13,6 +13,7 @@ import (
 	"github.com/film/violin/internal/jobs"
 	"github.com/film/violin/internal/mcp"
 	"github.com/film/violin/internal/models"
+	"github.com/film/violin/internal/setup"
 )
 
 func main() {
@@ -23,7 +24,15 @@ func main() {
 	var err error
 	switch os.Args[1] {
 	case "mcp", "serve":
-		err = mcp.Run(os.Stdin, os.Stdout)
+		if len(os.Args) > 2 && os.Args[2] == "install" {
+			err = installMCP(os.Args[3:])
+		} else {
+			err = mcp.Run(os.Stdin, os.Stdout)
+		}
+	case "init":
+		err = installMCP(os.Args[2:])
+	case "skills":
+		err = skillsCommand(os.Args[2:])
 	case "run":
 		err = runCommand(os.Args[2:])
 	case "wait":
@@ -47,7 +56,48 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: violin {mcp|run|wait|list|interrupt|config|model}")
+	fmt.Fprintln(os.Stderr, "usage: violin {mcp|init|skills|run|wait|list|interrupt|config|model}")
+}
+
+func installMCP(args []string) error {
+	apply := false
+	for _, arg := range args {
+		if arg == "--apply" {
+			apply = true
+		}
+		if arg == "--dry-run" {
+			apply = false
+		}
+	}
+	binary, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	plan, err := setup.MCPPlan(binary, apply)
+	if err != nil {
+		return err
+	}
+	return printJSON(plan)
+}
+
+func skillsCommand(args []string) error {
+	if len(args) == 0 || args[0] != "install" {
+		return errors.New("skills requires install")
+	}
+	apply := false
+	for _, arg := range args[1:] {
+		if arg == "--apply" {
+			apply = true
+		}
+		if arg == "--dry-run" {
+			apply = false
+		}
+	}
+	plan, err := setup.SkillsPlan(os.Getenv("VIOLIN_SKILLS_DIR"), apply)
+	if err != nil {
+		return err
+	}
+	return printJSON(plan)
 }
 
 func root() string {

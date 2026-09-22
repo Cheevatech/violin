@@ -2,6 +2,27 @@
 
 ## Go control plane and managed Laya model
 
+Install the public launcher without installing Go or Python:
+
+```bash
+npx violin doctor
+npx violin init --dry-run
+npx violin init --apply
+npx violin skills install --apply
+```
+
+The npm launcher downloads a platform-specific Go release binary and verifies
+its checksum before execution. Release targets are macOS/Linux on x64/arm64.
+Configuration changes are previewed by default and backups are created before
+applying them. Provider credentials must come from environment variables or the
+OS keychain; never commit them to this repository.
+
+The native Go provider boundary is now available for Qwen, AGY, and Claude,
+with offline parser tests and credential lookup. The existing Python worker
+entrypoints remain the compatibility path until the native provider execution
+path completes its MCP/job parity gate; they are not part of the intended final
+release runtime.
+
 The repository now contains a Go control-plane binary built with `make go-build`:
 
 ```bash

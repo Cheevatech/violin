@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without the leading v
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - goos: darwin
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: linux
+            goarch: amd64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+      - name: Build release binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p release
+          go build -trimpath -ldflags "-s -w" -o "release/violin-${GOOS}-${GOARCH}" ./cmd/violin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: violin-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: release/violin-${{ matrix.goos }}-${{ matrix.goarch }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - name: Generate checksum manifest
+        env:
+          VERSION: ${{ inputs.version }}
+          VIOLIN_RELEASE_PRIVATE_KEY: ${{ secrets.VIOLIN_RELEASE_PRIVATE_KEY }}
+        run: |
+          test -n "$VIOLIN_RELEASE_PRIVATE_KEY"
+          printf '%s\n' "$VIOLIN_RELEASE_PRIVATE_KEY" > release-private-key.pem
+          sha256sum release/violin-* > release/SHA256SUMS
+          python3 - <<'PY'
+          import hashlib, json, os
+          root = 'release'
+          artifacts = {}
+          checks = {}
+          for name in sorted(os.listdir(root)):
+              if name.startswith('violin-'):
+                  data = open(os.path.join(root, name), 'rb').read()
+                  key = name.removeprefix('violin-')
+                  artifacts[key] = {'url': name, 'sha256': hashlib.sha256(data).hexdigest()}
+          json.dump({'version': os.environ['VERSION'], 'artifacts': artifacts}, open(os.path.join(root, 'manifest.json'), 'w'), indent=2)
+          PY
+          python3 - <<'PY' > release/manifest-payload.json
+          import json
+          print(json.dumps(json.load(open('release/manifest.json'))['artifacts'], separators=(',', ':')))
+          PY
+          openssl pkeyutl -sign -rawin -inkey release-private-key.pem -in release/manifest-payload.json -out release/manifest.sig
+          python3 - <<'PY'
+          import base64, json
+          path = 'release/manifest.json'
+          data = json.load(open(path))
+          data['signature'] = base64.b64encode(open('release/manifest.sig', 'rb').read()).decode()
+          json.dump(data, open(path, 'w'), indent=2)
+          PY
+          rm -f release-private-key.pem release/manifest-payload.json release/manifest.sig
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          files: release/*
