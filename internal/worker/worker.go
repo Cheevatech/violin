@@ -412,6 +412,11 @@ func writeStatus(phase string, options Options, started time.Time) {
 	if path == "" {
 		return
 	}
-	data, _ := json.Marshal(map[string]any{"phase": phase, "pid": os.Getpid(), "elapsed_seconds": time.Since(started).Seconds(), "evidence": os.Getenv("VIOLIN_WORKER_EVIDENCE"), "effective_timeout_seconds": options.Timeout, "timeout_source": os.Getenv("VIOLIN_TIMEOUT_SOURCE")})
+	idleTimeout := options.IdleTimeout
+	if idleTimeout < 1 {
+		idleTimeout = 1
+	}
+	idleEnabled := options.IdleTimeout > 0 && options.Backend != "qwen" && options.Backend != "agy"
+	data, _ := json.Marshal(map[string]any{"phase": phase, "pid": os.Getpid(), "elapsed_seconds": time.Since(started).Seconds(), "evidence": os.Getenv("VIOLIN_WORKER_EVIDENCE"), "effective_timeout_seconds": options.Timeout, "timeout_source": timeoutSource(options), "idle_timeout_seconds": idleTimeout, "idle_timeout_enabled": idleEnabled})
 	_ = os.WriteFile(path, data, 0600)
 }
