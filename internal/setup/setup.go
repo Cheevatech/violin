@@ -158,6 +158,8 @@ implement = 3600
 [laya]
 mode = "shadow"
 timeout_seconds = 10
+# The Go binary includes the Laya inference engine. The install command installs
+# the verified English model; runner is only for development adapters.
 # runner = ["your-laya-runtime"]
 
 # Configure one or more providers explicitly. Examples:
