@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 import unittest
 
-RUNNER = Path(__file__).resolve().parents[1] / "bin/violin-worker"
+RUNNER = Path(__file__).resolve().parents[1] / "compat/python/bin/violin-worker"
 
 
 class WorkerTests(unittest.TestCase):
@@ -263,7 +263,7 @@ print(json.dumps({'type':'turn.completed'}))
             self.assertEqual(report["phase"], "timeout")
 
     def test_metadata_cache_entry_passes_preflight(self):
-        checker = Path(__file__).resolve().parents[1] / "bin/violin-qwen-metadata"
+        checker = Path(__file__).resolve().parents[1] / "compat/python/bin/violin-qwen-metadata"
         with tempfile.TemporaryDirectory() as directory:
             cache = Path(directory) / "models.json"
             cache.write_text(json.dumps({"fetched_at": "2099-01-01T00:00:00Z", "models": [{
@@ -274,7 +274,7 @@ print(json.dumps({'type':'turn.completed'}))
             self.assertEqual(result.returncode, 0)
 
     def test_incomplete_cache_entry_uses_effective_metadata(self):
-        checker = Path(__file__).resolve().parents[1] / "bin/violin-qwen-metadata"
+        checker = Path(__file__).resolve().parents[1] / "compat/python/bin/violin-qwen-metadata"
         with tempfile.TemporaryDirectory() as directory:
             cache = Path(directory) / "models.json"
             cache.write_text(json.dumps({"fetched_at": "2099-01-01T00:00:00Z", "models": [{
@@ -295,7 +295,7 @@ print(json.dumps({'type':'turn.completed'}))
             self.assertIn('"status": "degraded"', result.stdout)
 
     def test_missing_qwen_metadata_does_not_launch_backend(self):
-        checker = Path(__file__).resolve().parents[1] / "bin/violin-qwen-metadata"
+        checker = Path(__file__).resolve().parents[1] / "compat/python/bin/violin-qwen-metadata"
         with tempfile.TemporaryDirectory() as directory:
             cache = Path(directory) / "models.json"
             cache.write_text(json.dumps({"fetched_at": "2099-01-01T00:00:00Z", "models": []}))

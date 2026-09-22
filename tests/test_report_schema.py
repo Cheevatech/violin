@@ -15,7 +15,7 @@ class WorkerReportSchemaTests(unittest.TestCase):
             fake.write_text("#!/usr/bin/env python3\nprint('schema fixture')\n")
             fake.chmod(0o700)
             result = subprocess.run(
-                [str(root_dir / "bin/violin-worker"), "qwen", "-C", directory,
+                [str(root_dir / "compat/python/bin/violin-worker"), "qwen", "-C", directory,
                  "--timeout", "7", "--idle-timeout", "3"],
                 input="Inspect", text=True, capture_output=True,
                 env=dict(os.environ, VIOLIN_WORKER_RUNS=str(root / "runs"),

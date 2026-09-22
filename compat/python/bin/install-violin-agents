@@ -7,9 +7,9 @@ import subprocess
 import time
 import tomllib
 
-ROOT = Path(__file__).resolve().parents[1]
-START = "# BEGIN VIOLIN EXTERNAL AGENTS"
-END = "# END VIOLIN EXTERNAL AGENTS"
+ROOT = Path(__file__).resolve().parents[3]
+START = "# BEGIN VIOLIN MANAGED MCP"
+END = "# END VIOLIN MANAGED MCP"
 
 
 def replace_block(text, block):
@@ -28,15 +28,20 @@ def main():
     go_binary = ROOT / 'bin' / 'violin'
     if go:
         subprocess.run([go, 'build', '-o', str(go_binary), './cmd/violin'], cwd=ROOT, check=True)
+    if not go_binary.exists():
+        raise RuntimeError("Go Violin binary is required; Python MCP is no longer supported")
     config = home / ".codex/config.toml"
     guidance = home / ".codex/AGENTS.md"
     original = config.read_text() if config.exists() else ""
     parsed = tomllib.loads(original)
-    if "violin_agents" in parsed.get("mcp_servers", {}) and START not in original:
-        raise ValueError("An unmanaged violin_agents server already exists")
+    mcp_servers = parsed.get("mcp_servers", {})
+    if "violin" in mcp_servers and START not in original:
+        raise ValueError("An unmanaged violin MCP server already exists")
+    if "violin_agents" in mcp_servers and START not in original:
+        raise ValueError("An unmanaged legacy violin_agents MCP server already exists")
     block = f'''{START}
-[mcp_servers.violin_agents]
-command = {json.dumps(str(go_binary if go_binary.exists() else ROOT / 'bin/violin-agent-server'))}
+[mcp_servers.violin]
+command = {json.dumps(str(go_binary))}
 tool_timeout_sec = 60
 default_tools_approval_mode = "approve"
 {END}'''
@@ -45,7 +50,7 @@ default_tools_approval_mode = "approve"
     policy = f'''{START}
 ## External delegation (all workspaces and task types)
 
-When useful independent work warrants delegation, use `violin_agents.spawn_agent`
+When useful independent work warrants delegation, use `violin.spawn_agent`
 with backend `qwen` (self-hosted), `agy` (Gemini 3.8 Flash), or `claude` (Claude Code); prefer these over
 built-in collaboration agents to avoid OpenAI child-token spend. This instruction
 authorizes delegation of the user's task, not unrelated actions. Codex remains
@@ -84,14 +89,15 @@ claim native routing. Never copy the entire parent conversation into a worker.
     old_guidance = guidance.read_text() if guidance.exists() else ""
     new_guidance = replace_block(old_guidance, policy)
     # Validate every destination before changing any global file.
-    links = [(home / 'bin' / name, ROOT / 'bin' / name)
-             for name in ['violin-worker', 'violin_scheduler.py', 'violin-agent-server', 'violin-health',
-                           'violin-codex-qwen', 'violin-claude', 'qwen-mode', 'qwen-verify-gate']]
+    links = [(home / 'bin' / name, ROOT / 'compat/python/bin' / name)
+             for name in ['violin-worker', 'violin_scheduler.py', 'violin-health', 'violin-qwen-metadata']]
+    links += [(home / 'bin' / name, ROOT / 'bin' / name)
+              for name in ['violin-codex-qwen', 'violin-claude', 'qwen-mode', 'qwen-verify-gate']]
     if go_binary.exists():
         links.append((home / 'bin' / 'violin', go_binary))
         links.append((home / 'bin' / 'violin-agent', go_binary))
     else:
-        links.append((home / 'bin' / 'violin-agent', ROOT / 'bin' / 'violin-agent'))
+        links.append((home / 'bin' / 'violin-agent', ROOT / 'compat/python/bin/violin-agent'))
     for dest, source in links:
         if dest.exists() and (not dest.is_symlink() or dest.resolve() != source):
             raise ValueError(f"Unmanaged executable exists: {dest}")

@@ -5,7 +5,7 @@ import tomllib
 import unittest
 from unittest.mock import patch
 
-INSTALLER = Path(__file__).resolve().parents[1] / "bin/install-violin-agents"
+INSTALLER = Path(__file__).resolve().parents[1] / "compat/python/bin/install-violin-agents"
 
 
 class InstallTests(unittest.TestCase):

@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 import unittest
 
-SERVER = Path(__file__).resolve().parents[1] / "bin/violin-agent-server"
+SERVER = Path(__file__).resolve().parents[1] / "compat/python/bin/violin-agent-server"
 
 
 class ServerTests(unittest.TestCase):

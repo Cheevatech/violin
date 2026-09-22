@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 
-CLI = Path(__file__).resolve().parents[1] / "bin/violin-agent"
+CLI = Path(__file__).resolve().parents[1] / "compat/python/bin/violin-agent"
 
 
 class AgentCliTests(unittest.TestCase):

@@ -4,7 +4,7 @@ import os
 import tempfile
 import unittest
 
-from bin import violin_scheduler
+from compat.python.bin import violin_scheduler
 
 
 class SchedulerTests(unittest.TestCase):

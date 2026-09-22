@@ -15,7 +15,7 @@ go-build:
 	go build -o bin/violin ./cmd/violin
 
 vet:
-	python3 -m py_compile bin/violin_scheduler.py bin/violin-agent bin/violin-worker bin/violin-health bin/violin-qwen-metadata bin/violin-agent-server bin/install-violin-agents
+	python3 -m py_compile compat/python/bin/violin_scheduler.py compat/python/bin/violin-agent compat/python/bin/violin-worker compat/python/bin/violin-health compat/python/bin/violin-qwen-metadata compat/python/bin/violin-agent-server compat/python/bin/install-violin-agents
 	gofmt -l cmd internal
 	go vet ./...
 
