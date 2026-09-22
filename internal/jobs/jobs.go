@@ -435,7 +435,8 @@ func evaluateDecision(root, task, requested string) laya.Result {
 	if err != nil {
 		return laya.Result{Fallback: true, Error: err.Error()}
 	}
-	engine := laya.ManagedEngine{Manager: manager, Fallback: laya.FallbackEngine{}}
+	modelPath, _ := manager.ActivePath()
+	engine := laya.ManagedEngine{Manager: manager, Runner: laya.RunnerFromEnv(), ModelPath: modelPath, Fallback: laya.FallbackEngine{}}
 	result, _ := engine.Evaluate(laya.Request{Language: laya.ProtocolLanguage, State: map[string]any{"task": task}, Questions: []laya.Question{{ID: "backend", Kind: laya.Choice, Options: []string{"agy", "qwen", "claude"}, Fallback: requested}}})
 	return result
 }

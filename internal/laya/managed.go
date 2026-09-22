@@ -1,10 +1,13 @@
 package laya
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/film/violin/internal/models"
 )
@@ -14,9 +17,10 @@ import (
 // When no verified runtime is configured it is deliberately fail-safe and
 // returns typed fallback answers rather than silently pretending Laya ran.
 type ManagedEngine struct {
-	Manager  *models.Manager
-	Runner   []string
-	Fallback FallbackEngine
+	Manager   *models.Manager
+	Runner    []string
+	ModelPath string
+	Fallback  FallbackEngine
 }
 
 func (e ManagedEngine) Evaluate(request Request) (Result, error) {
@@ -26,11 +30,17 @@ func (e ManagedEngine) Evaluate(request Request) (Result, error) {
 		if !status.Verified {
 			return e.fallback(request, ErrUnavailable)
 		}
+		if e.ModelPath == "" {
+			e.ModelPath, _ = e.Manager.ActivePath()
+		}
 	}
 	if len(e.Runner) == 0 {
 		return e.fallback(request, ErrUnavailable)
 	}
-	command := exec.Command(e.Runner[0], e.Runner[1:]...)
+	commandContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	command := exec.CommandContext(commandContext, e.Runner[0], e.Runner[1:]...)
+	command.Env = append(os.Environ(), "VIOLIN_LAYA_MODEL_DIR="+e.ModelPath)
 	input, err := json.Marshal(request)
 	if err != nil {
 		return e.fallback(request, err)
@@ -38,6 +48,9 @@ func (e ManagedEngine) Evaluate(request Request) (Result, error) {
 	command.Stdin = strings.NewReader(string(input) + "\n")
 	output, err := command.Output()
 	if err != nil {
+		if errors.Is(commandContext.Err(), context.DeadlineExceeded) {
+			return e.fallback(request, errors.New("Laya runner timed out"))
+		}
 		return e.fallback(request, err)
 	}
 	var result Result
@@ -48,6 +61,18 @@ func (e ManagedEngine) Evaluate(request Request) (Result, error) {
 		result.ModelVersion = status.Manifest.Version
 	}
 	return result, nil
+}
+
+func RunnerFromEnv() []string {
+	value := strings.TrimSpace(os.Getenv("VIOLIN_LAYA_RUNNER"))
+	if value == "" {
+		return nil
+	}
+	var runner []string
+	if json.Unmarshal([]byte(value), &runner) != nil || len(runner) == 0 || strings.TrimSpace(runner[0]) == "" {
+		return nil
+	}
+	return runner
 }
 
 func (e ManagedEngine) fallback(request Request, err error) (Result, error) {
