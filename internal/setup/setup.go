@@ -155,6 +155,11 @@ max_seconds = 14400
 inspect = 900
 implement = 3600
 
+[laya]
+mode = "shadow"
+timeout_seconds = 10
+# runner = ["your-laya-runtime"]
+
 # Configure one or more providers explicitly. Examples:
 # [backend.qwen]
 # transport = "cli"

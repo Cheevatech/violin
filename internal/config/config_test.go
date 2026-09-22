@@ -55,3 +55,16 @@ func TestIdleTimeoutPolicyCanDeclareBuiltInCLI(t *testing.T) {
 		t.Fatal("built-in qwen CLI should not use idle timeout")
 	}
 }
+
+func TestLayaConfigEnvironmentOverridesAreValidated(t *testing.T) {
+	t.Setenv("VIOLIN_LAYA_MODE", "advisory")
+	t.Setenv("VIOLIN_LAYA_RUNNER", `["laya-runtime"]`)
+	settings, err := loadFiles([]string{})
+	if err != nil || settings.Laya.Mode != "advisory" || len(settings.Laya.Runner) != 1 {
+		t.Fatalf("settings=%+v err=%v", settings.Laya, err)
+	}
+	t.Setenv("VIOLIN_LAYA_MODE", "unsafe")
+	if _, err := loadFiles([]string{}); err == nil {
+		t.Fatal("expected invalid Laya mode rejection")
+	}
+}

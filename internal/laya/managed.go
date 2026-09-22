@@ -20,6 +20,7 @@ type ManagedEngine struct {
 	Manager   *models.Manager
 	Runner    []string
 	ModelPath string
+	Timeout   time.Duration
 	Fallback  FallbackEngine
 }
 
@@ -37,7 +38,11 @@ func (e ManagedEngine) Evaluate(request Request) (Result, error) {
 	if len(e.Runner) == 0 {
 		return e.fallback(request, ErrUnavailable)
 	}
-	commandContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	timeout := e.Timeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	commandContext, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	command := exec.CommandContext(commandContext, e.Runner[0], e.Runner[1:]...)
 	command.Env = append(os.Environ(), "VIOLIN_LAYA_MODEL_DIR="+e.ModelPath)

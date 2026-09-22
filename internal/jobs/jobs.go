@@ -88,8 +88,12 @@ func Spawn(o Options) (*Job, error) {
 	if _, err := os.Stat(o.Workspace); err != nil {
 		return nil, err
 	}
-	decision := evaluateDecision(o.Root, o.Task, o.Backend)
-	if o.Backend == "auto" && os.Getenv("VIOLIN_LAYA_MODE") == "active" && !decision.Fallback && len(decision.Answers) > 0 {
+	layaMode := cfg.Laya.Mode
+	if layaMode == "" {
+		layaMode = "shadow"
+	}
+	decision := evaluateDecision(o.Root, o.Task, o.Backend, cfg)
+	if o.Backend == "auto" && layaMode == "active" && !decision.Fallback && len(decision.Answers) > 0 {
 		if selected, ok := decision.Answers[0].Value.(string); ok && (selected == "agy" || selected == "qwen" || selected == "claude") {
 			o.Backend = selected
 		}
@@ -177,10 +181,7 @@ func Spawn(o Options) (*Job, error) {
 	}
 	_ = stdout.Close()
 	_ = stderr.Close()
-	d := Descriptor{AgentID: fmt.Sprintf("%d-%d", time.Now().UnixNano(), cmd.Process.Pid), Backend: o.Backend, RequestedBackend: o.RequestedBackend, PID: cmd.Process.Pid, Evidence: run, Output: outputPath, Status: statusPath, TaskFile: taskPath, Mode: o.Mode, Timeout: o.Timeout, TimeoutSource: o.TimeoutSource, IdleTimeout: o.IdleTimeout, IdleEnabled: config.IdleTimeoutEnabled(o.Backend, cfg.Backend[o.Backend]), OwnerPID: os.Getpid(), CreatedAt: time.Now(), LayaMode: os.Getenv("VIOLIN_LAYA_MODE"), LayaFallback: decision.Fallback, LayaModelVersion: decision.ModelVersion, LayaError: decision.Error}
-	if d.LayaMode == "" {
-		d.LayaMode = "shadow"
-	}
+	d := Descriptor{AgentID: fmt.Sprintf("%d-%d", time.Now().UnixNano(), cmd.Process.Pid), Backend: o.Backend, RequestedBackend: o.RequestedBackend, PID: cmd.Process.Pid, Evidence: run, Output: outputPath, Status: statusPath, TaskFile: taskPath, Mode: o.Mode, Timeout: o.Timeout, TimeoutSource: o.TimeoutSource, IdleTimeout: o.IdleTimeout, IdleEnabled: config.IdleTimeoutEnabled(o.Backend, cfg.Backend[o.Backend]), OwnerPID: os.Getpid(), CreatedAt: time.Now(), LayaMode: layaMode, LayaFallback: decision.Fallback, LayaModelVersion: decision.ModelVersion, LayaError: decision.Error}
 	j := &Job{Descriptor: d, path: filepath.Join(o.Root, "jobs", d.AgentID+".json"), cmd: cmd}
 	if err = os.MkdirAll(filepath.Dir(j.path), 0700); err != nil {
 		return nil, err
@@ -430,13 +431,17 @@ func workerEnv(cfg config.Config, backend, statusPath, root, timeoutSource strin
 	return env
 }
 
-func evaluateDecision(root, task, requested string) laya.Result {
+func evaluateDecision(root, task, requested string, cfg config.Config) laya.Result {
 	manager, err := models.NewManager(filepath.Join(root, "models"))
 	if err != nil {
 		return laya.Result{Fallback: true, Error: err.Error()}
 	}
 	modelPath, _ := manager.ActivePath()
-	engine := laya.ManagedEngine{Manager: manager, Runner: laya.RunnerFromEnv(), ModelPath: modelPath, Fallback: laya.FallbackEngine{}}
+	runner := cfg.Laya.Runner
+	if len(runner) == 0 {
+		runner = laya.RunnerFromEnv()
+	}
+	engine := laya.ManagedEngine{Manager: manager, Runner: runner, ModelPath: modelPath, Timeout: time.Duration(cfg.Laya.TimeoutSeconds) * time.Second, Fallback: laya.FallbackEngine{}}
 	result, _ := engine.Evaluate(laya.Request{Language: laya.ProtocolLanguage, State: map[string]any{"task": task}, Questions: []laya.Question{{ID: "backend", Kind: laya.Choice, Options: []string{"agy", "qwen", "claude"}, Fallback: requested}}})
 	return result
 }

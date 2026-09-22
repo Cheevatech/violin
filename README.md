@@ -58,6 +58,12 @@ The Laya English checkpoint is a separately versioned artifact managed under the
 shared worker state directory. Its manifest must declare `language: "en"`;
 multilingual checkpoints are intentionally outside this control-plane contract.
 Activation is atomic and checksum failures leave the current model untouched.
+Set `[laya].runner` to a JSON-argv model runtime and choose `shadow`,
+`advisory`, or `active` in `[laya].mode`. The runtime receives the verified
+active model directory as `VIOLIN_LAYA_MODEL_DIR`; `VIOLIN_LAYA_RUNNER` and
+`VIOLIN_LAYA_MODE` are environment overrides. Shadow and advisory modes record
+decisions without changing backend selection; active mode can change only an
+auto-selected backend after verified model inference succeeds.
 Laya decisions are initially fallback-safe and can
 be rolled out from shadow to advisory to active mode without changing provider
 worker commands. A base Laya checkpoint must not be treated as production

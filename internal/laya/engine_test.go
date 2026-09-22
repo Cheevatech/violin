@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/film/violin/internal/models"
 )
@@ -64,5 +65,29 @@ func TestRunnerFromEnvRequiresJSONArgv(t *testing.T) {
 	t.Setenv("VIOLIN_LAYA_RUNNER", "runner --json")
 	if RunnerFromEnv() != nil {
 		t.Fatal("expected non-JSON runner to be rejected")
+	}
+}
+
+func TestManagedEngineHonorsConfiguredRunnerTimeout(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	if err := os.Mkdir(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("model")
+	if err := os.WriteFile(filepath.Join(source, "model.bin"), payload, 0600); err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.Sum256(payload)
+	manager, err := models.NewManager(filepath.Join(root, "models"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Install(models.Manifest{ID: models.DefaultModelID, Language: models.DefaultLanguage, Version: "v1", Artifacts: []models.Artifact{{Path: "model.bin", SHA256: hex.EncodeToString(hash[:])}}}, source, true); err != nil {
+		t.Fatal(err)
+	}
+	result, err := (ManagedEngine{Manager: manager, Runner: []string{"/bin/sh", "-c", "sleep 2"}, Timeout: time.Second, Fallback: FallbackEngine{}}).Evaluate(Request{Language: ProtocolLanguage, Questions: []Question{{ID: "backend", Kind: Choice, Options: []string{"qwen"}}}})
+	if err != nil || !result.Fallback || result.Error != "Laya runner timed out" {
+		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }

@@ -47,10 +47,17 @@ type Scheduler struct {
 	MachineMaxConcurrency int      `toml:"machine_max_concurrency" json:"machine_max_concurrency"`
 }
 
+type Laya struct {
+	Mode           string   `toml:"mode" json:"mode"`
+	Runner         []string `toml:"runner" json:"runner,omitempty"`
+	TimeoutSeconds int      `toml:"timeout_seconds" json:"timeout_seconds"`
+}
+
 type Config struct {
 	Scheduler Scheduler          `toml:"scheduler" json:"scheduler"`
 	Backend   map[string]Backend `toml:"backend" json:"backend"`
 	Timeouts  Timeouts           `toml:"timeouts" json:"timeouts"`
+	Laya      Laya               `toml:"laya" json:"laya"`
 }
 
 func Defaults() Config {
@@ -62,6 +69,7 @@ func Defaults() Config {
 			"claude": {MaxConcurrency: 2, Protocol: "claude"},
 		},
 		Timeouts: Timeouts{MaxSeconds: 14400, Defaults: map[string]int{"inspect": 900, "implement": 3600}},
+		Laya:     Laya{Mode: "shadow", TimeoutSeconds: 10},
 	}
 }
 
@@ -114,6 +122,24 @@ func loadFiles(paths []string) (Config, error) {
 		if value := os.Getenv("VIOLIN_" + strings.ToUpper(mode) + "_TIMEOUT_SECONDS"); value != "" {
 			c.Timeouts.Defaults[mode] = atoi(value, c.Timeouts.Defaults[mode])
 		}
+	}
+	if value := os.Getenv("VIOLIN_LAYA_MODE"); value != "" {
+		c.Laya.Mode = value
+	}
+	if value := os.Getenv("VIOLIN_LAYA_RUNNER"); value != "" {
+		var runner []string
+		if json.Unmarshal([]byte(value), &runner) == nil {
+			c.Laya.Runner = runner
+		}
+	}
+	if value := os.Getenv("VIOLIN_LAYA_TIMEOUT_SECONDS"); value != "" {
+		c.Laya.TimeoutSeconds = atoi(value, c.Laya.TimeoutSeconds)
+	}
+	if c.Laya.Mode != "shadow" && c.Laya.Mode != "advisory" && c.Laya.Mode != "active" {
+		return c, os.ErrInvalid
+	}
+	if c.Laya.TimeoutSeconds < 1 {
+		return c, os.ErrInvalid
 	}
 	if c.Timeouts.Defaults["inspect"] > c.Timeouts.MaxSeconds || c.Timeouts.Defaults["implement"] > c.Timeouts.MaxSeconds {
 		return c, os.ErrInvalid
