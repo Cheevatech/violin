@@ -8,8 +8,11 @@ Install the public launcher without installing Go or Python:
 npx violin doctor
 npx violin init --dry-run
 npx violin init --apply
+npx violin config init --dry-run
+npx violin config init --apply
 npx violin skills install --apply
 npx violin auth status all
+npx violin health all
 npx violin auth login claude
 npx violin auth login qwen
 npx violin auth set qwen-api < /path/to/qwen-api-key.txt
@@ -21,11 +24,11 @@ Configuration changes are previewed by default and backups are created before
 applying them. Provider credentials must come from environment variables or the
 OS keychain; never commit them to this repository.
 
-The native Go provider boundary is now available for Qwen, AGY, and Claude,
-with offline parser tests and credential lookup. The existing Python worker
-entrypoints remain the compatibility path until the native provider execution
-path completes its MCP/job parity gate; they are not part of the intended final
-release runtime.
+The native Go provider boundary is available for Qwen, AGY, and Claude, with
+offline parser tests, credential lookup, lifecycle recovery, and MCP/job
+parity coverage. Configured CLI and API transports execute through the Go
+worker; the existing Python worker entrypoints remain available as an explicit
+compatibility path for legacy configurations.
 
 Authentication is global to the current OS user, not to a Violin job or
 session. Claude uses `claude auth login`; Qwen uses `codex login`; AGY has no
@@ -47,7 +50,8 @@ The repository now contains a Go control-plane binary built with `make go-build`
 ./bin/violin model update --manifest /path/manifest.json --source-dir /path/model-bundle
 ```
 
-The Go binary owns MCP, job lifecycle, evidence descriptors, and model activation.
+The Go binary owns MCP, job lifecycle, evidence descriptors, provider health,
+and model activation.
 The Laya English checkpoint is a separately versioned artifact managed under the
 shared worker state directory. Its manifest must declare `language: "en"`;
 multilingual checkpoints are intentionally outside this control-plane contract.
@@ -96,6 +100,8 @@ retry occurs, and a partial Qwen implementation is never retried on AGY.
 
 `~/.config/violin/config.toml` configures scheduler order, session and machine
 limits, backend transport/auth policy, backend limits, and executable paths.
+`violin config init` creates a credential-free starter file and refuses to
+overwrite an existing config.
 The legacy `~/.config/violin-agents/config.toml` remains supported during
 migration, and `<workspace>/.violin/config.toml` can override non-secret project
 policy. `VIOLIN_CONFIG`, the
@@ -133,6 +139,12 @@ The equivalent environment overrides are
 `VIOLIN_TIMEOUT_MAX_SECONDS`, `VIOLIN_INSPECT_TIMEOUT_SECONDS`, and
 `VIOLIN_IMPLEMENT_TIMEOUT_SECONDS`. Built-in Qwen and AGY still use the hard
 timeout only; custom commands retain idle-timeout protection.
+
+For a machine-specific CLI command without storing it in a config file, set
+`VIOLIN_<BACKEND>_CLI_COMMAND` to a JSON argv array. This value is never
+treated as shell code. Built-in routes may set
+`idle_timeout_enabled = false` explicitly when their provider can spend time
+reasoning without emitting progress.
 
 Backend commands can be replaced in the config with an argv list or a
 shell-like string parsed without a shell. A config-file `command` is always
