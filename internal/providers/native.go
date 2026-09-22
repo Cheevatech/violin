@@ -8,24 +8,62 @@ import (
 )
 
 func NewQwen(baseURL, apiKey, model string) HTTPProvider {
+	return NewQwenWithWireAPI(baseURL, apiKey, model, "chat_completions")
+}
+
+func NewQwenWithWireAPI(baseURL, apiKey, model, wireAPI string) HTTPProvider {
+	endpoint := strings.TrimRight(baseURL, "/") + "/v1/chat/completions"
+	buildBody := func(request Request) (any, error) {
+		return map[string]any{"model": model, "messages": []map[string]string{{"role": "user", "content": request.Task}}, "stream": false}, nil
+	}
+	parser := parseOpenAIResponse("qwen")
+	if strings.EqualFold(strings.TrimSpace(wireAPI), "responses") {
+		endpoint = strings.TrimRight(baseURL, "/") + "/v1/responses"
+		buildBody = func(request Request) (any, error) {
+			return map[string]any{"model": model, "input": request.Task, "stream": false}, nil
+		}
+		parser = parseResponsesResponse
+	}
 	return HTTPProvider{
-		NameValue: "qwen", BaseURL: strings.TrimRight(baseURL, "/") + "/v1/chat/completions", APIKey: "Bearer " + apiKey, Header: "Authorization",
-		BuildBody: func(request Request) (any, error) {
-			return map[string]any{"model": model, "messages": []map[string]string{{"role": "user", "content": request.Task}}, "stream": false}, nil
-		},
-		ParseBody: parseOpenAIResponse("qwen"),
+		NameValue: "qwen", BaseURL: endpoint, APIKey: "Bearer " + apiKey, Header: "Authorization", BuildBody: buildBody, ParseBody: parser,
 	}
 }
 
 func NewAGY(baseURL, apiKey, model string) HTTPProvider {
-	endpoint := strings.TrimRight(baseURL, "/") + "/v1beta/models/" + url.PathEscape(model) + ":generateContent?key=" + url.QueryEscape(apiKey)
+	endpoint := strings.TrimRight(baseURL, "/") + "/v1beta/models/" + url.PathEscape(model) + ":generateContent"
 	return HTTPProvider{
-		NameValue: "agy", BaseURL: endpoint, Header: "",
+		NameValue: "agy", BaseURL: endpoint, APIKey: apiKey, Header: "x-goog-api-key",
 		BuildBody: func(request Request) (any, error) {
 			return map[string]any{"contents": []map[string]any{{"role": "user", "parts": []map[string]string{{"text": request.Task}}}}}, nil
 		},
 		ParseBody: parseGeminiResponse,
 	}
+}
+
+func parseResponsesResponse(data []byte) (Result, error) {
+	var payload struct {
+		Output []struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+		Usage any `json:"usage"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return Result{}, err
+	}
+	var text string
+	for _, item := range payload.Output {
+		for _, content := range item.Content {
+			if strings.TrimSpace(content.Text) != "" {
+				text += content.Text
+			}
+		}
+	}
+	if strings.TrimSpace(text) == "" {
+		return Result{}, fmt.Errorf("qwen responses response has no output text")
+	}
+	return Result{Provider: "qwen", Status: "completed", Text: text, Usage: payload.Usage}, nil
 }
 
 func NewClaude(baseURL, apiKey, model string) HTTPProvider {

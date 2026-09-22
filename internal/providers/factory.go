@@ -2,6 +2,7 @@ package providers
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/film/violin/internal/config"
@@ -13,26 +14,43 @@ func FromEnvironment(ctx context.Context, store credentials.Store) (map[string]P
 }
 
 func FromConfig(ctx context.Context, settings config.Config, store credentials.Store) (map[string]Provider, error) {
+	result := make(map[string]Provider, 3)
+	for _, name := range []string{"qwen", "agy", "claude"} {
+		provider, err := FromConfigProvider(ctx, settings, store, name)
+		if err != nil {
+			return nil, err
+		}
+		result[name] = provider
+	}
+	return result, nil
+}
+
+func FromConfigProvider(ctx context.Context, settings config.Config, store credentials.Store, name string) (Provider, error) {
 	qwen := settings.Backend["qwen"].API
 	agy := settings.Backend["agy"].API
 	claude := settings.Backend["claude"].API
-	qwenKey, err := lookupAPIKey(ctx, store, "qwen", qwen.APIKeyEnv)
-	if err != nil {
-		return nil, err
+	switch name {
+	case "qwen":
+		key, err := lookupAPIKey(ctx, store, name, qwen.APIKeyEnv)
+		if err != nil {
+			return nil, err
+		}
+		return NewQwenWithWireAPI(qwen.BaseURL, key, envOrValue(qwen.Model, "qwen"), qwen.WireAPI), nil
+	case "agy":
+		key, err := lookupAPIKey(ctx, store, name, agy.APIKeyEnv)
+		if err != nil {
+			return nil, err
+		}
+		return NewAGY(envOrValue(agy.BaseURL, "https://generativelanguage.googleapis.com"), key, envOrValue(agy.Model, "gemini-2.5-flash")), nil
+	case "claude":
+		key, err := lookupAPIKey(ctx, store, name, claude.APIKeyEnv)
+		if err != nil {
+			return nil, err
+		}
+		return NewClaude(envOrValue(claude.BaseURL, "https://api.anthropic.com"), key, envOrValue(claude.Model, "claude-sonnet-4-5")), nil
+	default:
+		return nil, fmt.Errorf("unknown provider %q", name)
 	}
-	agyKey, err := lookupAPIKey(ctx, store, "agy", agy.APIKeyEnv)
-	if err != nil {
-		return nil, err
-	}
-	claudeKey, err := lookupAPIKey(ctx, store, "claude", claude.APIKeyEnv)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]Provider{
-		"qwen":   NewQwen(qwen.BaseURL, qwenKey, envOrValue(qwen.Model, "qwen")),
-		"agy":    NewAGY(envOrValue(agy.BaseURL, "https://generativelanguage.googleapis.com"), agyKey, envOrValue(agy.Model, "gemini-2.5-flash")),
-		"claude": NewClaude(envOrValue(claude.BaseURL, "https://api.anthropic.com"), claudeKey, envOrValue(claude.Model, "claude-sonnet-4-5")),
-	}, nil
 }
 
 func lookupAPIKey(ctx context.Context, store credentials.Store, provider, configuredEnv string) (string, error) {

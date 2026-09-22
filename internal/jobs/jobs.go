@@ -147,13 +147,18 @@ func Spawn(o Options) (*Job, error) {
 	outputPath := filepath.Join(run, "output.json")
 	statusPath := filepath.Join(run, "status.json")
 	worker := os.Getenv("VIOLIN_WORKER_BIN")
-	if worker == "" {
+	native := cfg.Backend[o.Backend].Transport != "" && cfg.Backend[o.Backend].Command == nil
+	workerArgs := []string{o.Backend, "--mode", o.Mode, "-C", o.Workspace, "--task-file", taskPath, "--timeout", strconv.Itoa(o.Timeout), "--idle-timeout", strconv.Itoa(o.IdleTimeout)}
+	if native {
+		worker = os.Args[0]
+		workerArgs = append([]string{"worker"}, workerArgs...)
+	} else if worker == "" {
 		worker = filepath.Join(filepath.Dir(os.Args[0]), "..", "bin", "violin-worker")
 	}
 	if _, err = os.Stat(worker); err != nil {
 		worker = filepath.Join(filepath.Dir(os.Args[0]), "violin-worker")
 	}
-	cmd := exec.Command(worker, o.Backend, "--mode", o.Mode, "-C", o.Workspace, "--task-file", taskPath, "--timeout", strconv.Itoa(o.Timeout), "--idle-timeout", strconv.Itoa(o.IdleTimeout))
+	cmd := exec.Command(worker, workerArgs...)
 	stdout, err := os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return nil, err
@@ -164,6 +169,7 @@ func Spawn(o Options) (*Job, error) {
 	}
 	cmd.Stdout, cmd.Stderr, cmd.Dir = stdout, stderr, o.Workspace
 	cmd.Env = workerEnv(cfg, o.Backend, statusPath, o.Root, o.TimeoutSource)
+	cmd.Env = append(cmd.Env, "VIOLIN_WORKER_EVIDENCE="+run)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err = cmd.Start(); err != nil {
 		return nil, err

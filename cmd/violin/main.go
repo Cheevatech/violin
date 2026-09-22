@@ -19,6 +19,7 @@ import (
 	"github.com/film/violin/internal/mcp"
 	"github.com/film/violin/internal/models"
 	"github.com/film/violin/internal/setup"
+	"github.com/film/violin/internal/worker"
 )
 
 func main() {
@@ -52,6 +53,8 @@ func main() {
 		err = configCommand(os.Args[2:])
 	case "model":
 		err = modelCommand(os.Args[2:])
+	case "worker":
+		err = workerCommand(os.Args[2:])
 	default:
 		usage()
 		err = fmt.Errorf("unknown command %q", os.Args[1])
@@ -60,6 +63,14 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func workerCommand(args []string) error {
+	options, err := worker.Parse(args)
+	if err != nil {
+		return err
+	}
+	return worker.Run(context.Background(), options)
 }
 
 func usage() {
