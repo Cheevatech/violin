@@ -78,6 +78,25 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':42}}))
         self.assertEqual(report["usage"]["input_tokens"], 42)
         self.assertEqual(report["summary"], "evidence verified")
 
+    def test_qwen_command_execution_can_run_longer_than_idle_timeout(self):
+        code, report = self.run_worker("qwen", """import json,time
+print(json.dumps({'type':'item.started','item':{'type':'command_execution','status':'in_progress'}}), flush=True)
+time.sleep(2)
+print(json.dumps({'type':'item.completed','item':{'type':'command_execution','status':'completed'}}), flush=True)
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'command finished'}}), flush=True)
+print(json.dumps({'type':'turn.completed'}), flush=True)
+""", "--timeout", "5", "--idle-timeout", "1")
+        self.assertEqual(code, 0)
+        self.assertEqual(report["summary"], "command finished")
+
+    def test_agy_non_streaming_run_uses_hard_timeout(self):
+        code, report = self.run_worker("agy", """import json,time
+time.sleep(2)
+print(json.dumps({'status':'SUCCESS','response':'agy finished'}))
+""", "--timeout", "5", "--idle-timeout", "1")
+        self.assertEqual(code, 0)
+        self.assertEqual(report["summary"], "agy finished")
+
     def test_qwen_accumulates_response_deltas(self):
         code, report = self.run_worker("qwen", """import json
 print(json.dumps({'type':'response.output_text.delta','delta':'hello '}))

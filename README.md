@@ -89,7 +89,10 @@ The supported phases are `starting`, `metadata_check`, `backend_starting`,
 snapshot, including phase and evidence, when its wait interval expires. The
 worker idle timeout defaults to 300 seconds and measures time since the last
 event or heartbeat; configure it with `--idle-timeout` or
-`idle_timeout_seconds` on `spawn_agent`.
+`idle_timeout_seconds` on `spawn_agent`. A recognized Qwen command-execution
+item keeps the worker alive until its completion event; the built-in AGY JSON
+adapter has no progress stream, so it relies on the hard task timeout instead
+of falsely treating normal reasoning time as idle.
 
 When a run stops, inspect `report.json`, `status.json`, `metadata.json`,
 `process.json`, `stdout.log`, and `stderr.log` under the reported evidence path.
