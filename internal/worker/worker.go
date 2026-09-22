@@ -23,6 +23,7 @@ import (
 type Options struct {
 	Backend, Mode, Workspace, TaskFile string
 	Timeout, IdleTimeout               int
+	baseline                           []string
 }
 
 type executionError struct {
@@ -69,6 +70,7 @@ func Run(ctx context.Context, options Options) error {
 		return err
 	}
 	backend := settings.Backend[options.Backend]
+	options.baseline = gitFiles(options.Workspace)
 	started := time.Now()
 	writeStatus("starting", options, started)
 	writeStatus("running", options, started)
@@ -93,6 +95,7 @@ func Run(ctx context.Context, options Options) error {
 	if strings.TrimSpace(text) == "" {
 		return writeFailure(options, started, errors.New("provider returned an empty response"))
 	}
+	writeStatus("completed", options, started)
 	return writeReport(options, started, "completed", 0, text, usage, "")
 }
 
@@ -210,20 +213,106 @@ func runCLI(parent context.Context, command []string, task string, options Optio
 		}
 		return "", executionError{status: "provider_error", err: fmt.Errorf("%s: %w", argv[0], waitErr)}
 	}
-	return parseCLIOutput(bytes.TrimSpace(append(output, errorOutput...))), nil
+	return parseProviderOutput(bytes.TrimSpace(append(output, errorOutput...)), options.Backend)
 }
 
 func parseCLIOutput(data []byte) string {
+	text, err := parseProviderOutput(data, "custom")
+	if err != nil {
+		return strings.TrimSpace(string(data))
+	}
+	return text
+}
+
+// parseProviderOutput accepts both one-shot JSON and JSONL event streams used
+// by Qwen/AGY/Claude CLIs. It deliberately keeps protocol interpretation at
+// the worker boundary so providers can evolve without changing job lifecycle.
+func parseProviderOutput(data []byte, backend string) (string, error) {
 	value := strings.TrimSpace(string(data))
-	var payload map[string]any
-	if json.Unmarshal([]byte(value), &payload) == nil {
-		for _, key := range []string{"response", "result", "output", "text", "content"} {
-			if text, ok := payload[key].(string); ok && strings.TrimSpace(text) != "" {
-				return text
+	if value == "" {
+		return "", errors.New("provider returned an empty response")
+	}
+	var events []map[string]any
+	if json.Unmarshal([]byte(value), &events) != nil {
+		for _, line := range strings.Split(value, "\n") {
+			var event map[string]any
+			if json.Unmarshal([]byte(strings.TrimSpace(line)), &event) == nil {
+				events = append(events, event)
 			}
 		}
 	}
-	return value
+	if len(events) == 0 {
+		var payload map[string]any
+		if json.Unmarshal([]byte(value), &payload) != nil {
+			return value, nil
+		}
+		events = []map[string]any{payload}
+	}
+	var textParts []string
+	var final string
+	for _, event := range events {
+		kind, _ := event["type"].(string)
+		if kind == "result" {
+			if failed, _ := event["is_error"].(bool); failed || strings.HasPrefix(strings.ToLower(fmt.Sprint(event["subtype"])), "error") {
+				return "", fmt.Errorf("%s provider error: %s", backend, eventText(event))
+			}
+		}
+		if kind == "response.completed" {
+			if response, ok := event["response"].(map[string]any); ok {
+				if status, _ := response["status"].(string); status == "failed" || status == "incomplete" {
+					return "", fmt.Errorf("%s provider response %s: %s", backend, status, eventText(response))
+				}
+			}
+		}
+		candidate := eventText(event)
+		if kind == "item.completed" {
+			if item, ok := event["item"].(map[string]any); ok && item["type"] != "agent_message" && item["type"] != "message" {
+				candidate = ""
+			}
+		}
+		if strings.TrimSpace(candidate) != "" {
+			if kind == "result" || kind == "response.completed" {
+				final = candidate
+			} else {
+				textParts = append(textParts, candidate)
+			}
+		}
+	}
+	if strings.TrimSpace(final) != "" {
+		return final, nil
+	}
+	if len(textParts) > 0 {
+		return strings.Join(textParts, ""), nil
+	}
+	return "", fmt.Errorf("%s provider returned no final text", backend)
+}
+
+func eventText(event map[string]any) string {
+	for _, key := range []string{"response", "result", "output_text", "output", "text", "content"} {
+		if text, ok := event[key].(string); ok && strings.TrimSpace(text) != "" {
+			return text
+		}
+	}
+	if item, ok := event["item"].(map[string]any); ok {
+		if text := eventText(item); text != "" {
+			return text
+		}
+	}
+	if response, ok := event["response"].(map[string]any); ok {
+		if text := eventText(response); text != "" {
+			return text
+		}
+	}
+	if values, ok := event["content"].([]any); ok {
+		var parts []string
+		for _, value := range values {
+			if part, ok := value.(map[string]any); ok {
+				parts = append(parts, eventText(part))
+			}
+		}
+		return strings.Join(parts, "")
+	}
+	return ""
 }
 
 func writeFailure(options Options, started time.Time, err error) error {
@@ -242,7 +331,7 @@ func writeReport(options Options, started time.Time, status string, exitCode int
 	if run == "" {
 		run = filepath.Dir(options.TaskFile)
 	}
-	changed := changedFiles(options.Workspace)
+	changed := changedFiles(options.Workspace, options.baseline)
 	diffCheck := gitDiffCheck(options.Workspace)
 	idleTimeout := options.IdleTimeout
 	if idleTimeout < 1 {
@@ -272,7 +361,7 @@ func timeoutSource(options Options) string {
 	return "explicit"
 }
 
-func changedFiles(workspace string) []string {
+func gitFiles(workspace string) []string {
 	output, err := exec.Command("git", "-C", workspace, "status", "--short").Output()
 	if err != nil {
 		return []string{}
@@ -289,6 +378,21 @@ func changedFiles(workspace string) []string {
 		}
 	}
 	return result
+}
+
+func changedFiles(workspace string, baseline []string) []string {
+	current := gitFiles(workspace)
+	before := make(map[string]bool, len(baseline))
+	for _, file := range baseline {
+		before[file] = true
+	}
+	var changed []string
+	for _, file := range current {
+		if !before[file] {
+			changed = append(changed, file)
+		}
+	}
+	return changed
 }
 
 func gitDiffCheck(workspace string) map[string]any {

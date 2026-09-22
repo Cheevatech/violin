@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,6 +20,20 @@ func TestParseCLIOutputSupportsCommonJSONResultFields(t *testing.T) {
 		if got := parseCLIOutput([]byte(test.input)); got != test.want {
 			t.Fatalf("input=%q got=%q want=%q", test.input, got, test.want)
 		}
+	}
+}
+
+func TestParseProviderOutputUnderstandsProviderEventStreams(t *testing.T) {
+	qwen, err := parseProviderOutput([]byte("{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"reasoned \"}}\n{\"type\":\"turn.completed\"}\n"), "qwen")
+	if err != nil || qwen != "reasoned " {
+		t.Fatalf("qwen=%q err=%v", qwen, err)
+	}
+	claude, err := parseProviderOutput([]byte(`{"type":"result","subtype":"success","result":"claude final"}`), "claude")
+	if err != nil || claude != "claude final" {
+		t.Fatalf("claude=%q err=%v", claude, err)
+	}
+	if _, err := parseProviderOutput([]byte(`{"type":"result","subtype":"error_during_execution","is_error":true,"result":"expired"}`), "claude"); err == nil {
+		t.Fatal("expected provider event error")
 	}
 }
 
@@ -75,5 +90,17 @@ func TestRunAPITransportWritesResponsesReport(t *testing.T) {
 	}
 	if report["status"] != "completed" || report["summary"] != "native go response" || report["idle_timeout_enabled"] != false {
 		t.Fatalf("unexpected report: %+v", report)
+	}
+}
+
+func TestRunCLIReportsIdleTimeoutAfterProviderEvent(t *testing.T) {
+	options := Options{Backend: "claude", Workspace: t.TempDir(), Timeout: 5, IdleTimeout: 1}
+	_, err := runCLI(context.Background(), []string{"/bin/sh", "-c", "printf '%s\\n' '\"type\":\"item.completed\"'; sleep 2"}, "task", options)
+	if err == nil {
+		t.Fatal("expected idle timeout")
+	}
+	var execution executionError
+	if !errors.As(err, &execution) || execution.status != "idle_timeout" {
+		t.Fatalf("err=%v", err)
 	}
 }
