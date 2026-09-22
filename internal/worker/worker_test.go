@@ -113,3 +113,14 @@ func TestRunCLIReportsIdleTimeoutAfterProviderEvent(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestRunCLISupportsTaskArgumentPlaceholder(t *testing.T) {
+	options := Options{Backend: "agy", Workspace: t.TempDir(), Timeout: 5, IdleTimeoutEnabled: false}
+	got, err := runCLI(context.Background(), []string{"/bin/sh", "-c", "printf '%s' \"$1\"", "shell", "{task}"}, "task with spaces", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "task with spaces" {
+		t.Fatalf("got=%q", got)
+	}
+}

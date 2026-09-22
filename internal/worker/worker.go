@@ -133,7 +133,7 @@ func runCLI(parent context.Context, command []string, task string, options Optio
 	if len(command) == 0 {
 		return "", errors.New("CLI transport is not configured")
 	}
-	values := map[string]string{"workspace": options.Workspace, "task_file": options.TaskFile, "mode": options.Mode, "timeout": fmt.Sprint(options.Timeout)}
+	values := map[string]string{"workspace": options.Workspace, "task": task, "task_file": options.TaskFile, "mode": options.Mode, "timeout": fmt.Sprint(options.Timeout)}
 	argv := make([]string, len(command))
 	for i, value := range command {
 		for key, replacement := range values {
