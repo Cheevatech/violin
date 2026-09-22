@@ -6,13 +6,12 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
 from violin_scheduler import (Scheduler, load_config, resolve_timeout,
-                               run_custom_health, worker_environment)
+                               run_custom_health)
+from violin_runtime import launch_worker
 
-RUNNER = Path(__file__).resolve().with_name("violin-worker")
 HEALTH = Path(__file__).resolve().with_name("violin-health")
 JOBS = {}
 # MCP tool_timeout_sec is 60s. Keep synchronous auto preflight below it so
@@ -161,26 +160,15 @@ def dispatch(name, args):
                                          "capacity_snapshot": counts or {}, "quotas": quota or {},
                                          "reason": reason or "backend_capacity_full"}))
         backend = json.loads(lease.read_text())["backend"]
-        directory = Path(tempfile.mkdtemp(prefix="agent-", dir=root))
-        taskfile = directory / "task.txt"
-        taskfile.write_text(task)
-        output = directory / "output.json"
-        status_path = directory / "status.json"
-        status_path.write_text(json.dumps({"phase": "starting", "last_event_at": time.time(),
-                                           "elapsed_seconds": 0, "pid": None,
-                                           "timeout_deadline": None, "command_type": None,
-                                           "evidence": str(directory)}))
-        worker_env = worker_environment(dict(os.environ, VIOLIN_WORKER_STATUS=str(status_path)), config)
         try:
-            with output.open("w") as out, (directory / "server-stderr.log").open("w") as err:
-                proc = subprocess.Popen([str(RUNNER), backend, "--mode", mode, "-C", str(cwd),
-                                         "--task-file", str(taskfile), "--timeout", str(timeout),
-                                         "--idle-timeout", str(idle_timeout)],
-                                        stdin=subprocess.DEVNULL, stdout=out, stderr=err, env=worker_env,
-                                        start_new_session=True)
+            launch = launch_worker(root, cwd, backend, mode, task, timeout,
+                                   idle_timeout, config, "agent-")
         except OSError:
             scheduler.release_lease(lease)
             raise
+        proc = launch["process"]
+        directory, output, status_path = (launch["directory"], launch["output"],
+                                          launch["status"])
         scheduler.update_lease(lease, proc.pid)
         agent_id = str(uuid.uuid4())
         job = {"id": agent_id, "backend": backend, "process": proc, "output": output,
@@ -188,8 +176,7 @@ def dispatch(name, args):
                "requested_backend": requested_backend, "capacity_snapshot": counts,
                "quota": quota, "fallback_reason": ("qwen_health_failed" if health_failed else reason),
                "effective_timeout_seconds": timeout, "timeout_source": timeout_source,
-               "idle_timeout_enabled": not (backend in ("agy", "qwen") and
-                                             not config.get("custom_commands", {}).get(backend, False))}
+               "idle_timeout_enabled": launch["idle_timeout_enabled"]}
         if health_evidence is not None:
             job["health_evidence"] = health_evidence
         JOBS[agent_id] = job

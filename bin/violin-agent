@@ -7,16 +7,15 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
 
 from violin_scheduler import (BACKENDS, Scheduler, config_view, load_config,
-                              resolve_timeout, run_custom_health, worker_environment)
+                              resolve_timeout, run_custom_health)
+from violin_runtime import launch_worker
 
 
 ROOT = Path(__file__).resolve().parent
-RUNNER = ROOT / "violin-worker"
 
 
 def run_root():
@@ -93,19 +92,12 @@ def spawn(args):
                                      "quotas": quota or {}}, ensure_ascii=False))
     backend = json.loads(lease.read_text())["backend"]
     timeout, timeout_source = resolve_timeout(config, args.mode, args.timeout)
-    directory = Path(tempfile.mkdtemp(prefix="cli-agent-", dir=root))
-    taskfile = directory / "task.txt"
-    taskfile.write_text(args.task if args.task is not None else Path(args.task_file).read_text())
-    output = directory / "output.json"
-    status = directory / "status.json"
-    status.write_text(json.dumps({"phase": "starting", "evidence": str(directory),
-                                  "last_event_at": time.time(), "elapsed_seconds": 0}))
-    env = worker_environment(dict(os.environ, VIOLIN_WORKER_STATUS=str(status)), config)
-    proc = subprocess.Popen([str(RUNNER), backend, "--mode", args.mode, "-C", str(Path(args.cwd).resolve()),
-                             "--task-file", str(taskfile), "--timeout", str(timeout),
-                             "--idle-timeout", str(args.idle_timeout)], stdin=subprocess.DEVNULL,
-                            stdout=output.open("w"), stderr=(directory / "stderr.log").open("w"),
-                            env=env, start_new_session=True)
+    task = args.task if args.task is not None else Path(args.task_file).read_text()
+    launch = launch_worker(root, Path(args.cwd).resolve(), backend, args.mode, task,
+                           timeout, args.idle_timeout, config, "cli-agent-",
+                           stderr_filename="stderr.log")
+    proc = launch["process"]
+    directory, output = launch["directory"], launch["output"]
     scheduler.update_lease(lease, proc.pid)
     agent_id = str(uuid.uuid4())
     record = jobs_dir(root) / f"{agent_id}.json"
