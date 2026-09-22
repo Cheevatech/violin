@@ -15,6 +15,7 @@ import (
 	"github.com/film/violin/internal/auth"
 	"github.com/film/violin/internal/config"
 	"github.com/film/violin/internal/credentials"
+	"github.com/film/violin/internal/health"
 	"github.com/film/violin/internal/jobs"
 	"github.com/film/violin/internal/mcp"
 	"github.com/film/violin/internal/models"
@@ -41,6 +42,8 @@ func main() {
 		err = skillsCommand(os.Args[2:])
 	case "auth":
 		err = authCommand(os.Args[2:])
+	case "health":
+		err = healthCommand(os.Args[2:])
 	case "run":
 		err = runCommand(os.Args[2:])
 	case "wait":
@@ -74,7 +77,29 @@ func workerCommand(args []string) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: violin {mcp|init|skills|auth|run|wait|list|interrupt|config|model}")
+	fmt.Fprintln(os.Stderr, "usage: violin {mcp|init|skills|auth|health|run|wait|list|interrupt|config|model}")
+}
+
+func healthCommand(args []string) error {
+	provider := "all"
+	if len(args) > 0 {
+		provider = args[0]
+	}
+	settings, err := config.LoadFor("")
+	if err != nil {
+		return err
+	}
+	if provider == "all" {
+		result := map[string]health.Result{}
+		for _, name := range []string{"qwen", "agy", "claude"} {
+			result[name] = health.Check(context.Background(), settings, name, credentials.Default())
+		}
+		return printJSON(result)
+	}
+	if provider != "qwen" && provider != "agy" && provider != "claude" {
+		return fmt.Errorf("unknown provider %q", provider)
+	}
+	return printJSON(health.Check(context.Background(), settings, provider, credentials.Default()))
 }
 
 func authCommand(args []string) error {

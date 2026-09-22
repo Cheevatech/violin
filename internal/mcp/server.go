@@ -13,6 +13,7 @@ import (
 	"github.com/film/violin/internal/auth"
 	"github.com/film/violin/internal/config"
 	"github.com/film/violin/internal/credentials"
+	"github.com/film/violin/internal/health"
 	"github.com/film/violin/internal/jobs"
 )
 
@@ -80,6 +81,10 @@ func tools() map[string]any {
 		{"name": "list_agents", "description": "List agent jobs.", "inputSchema": object(map[string]any{}, nil)},
 		{"name": "interrupt_agent", "description": "Interrupt an agent without reverting work.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}}, []string{"agent_id"})},
 		{"name": "auth_status", "description": "Inspect global provider authentication without exposing credentials.", "inputSchema": object(map[string]any{}, nil)},
+		{"name": "health_status", "description": "Run configured provider health checks without exposing credentials.", "inputSchema": object(
+			map[string]any{"provider": map[string]any{"type": "string", "enum": []string{"qwen", "agy", "claude", "all"}}},
+			[]string{"provider"},
+		)},
 	}}
 }
 func call(params map[string]any) (any, error) {
@@ -93,6 +98,23 @@ func call(params map[string]any) (any, error) {
 			return nil, err
 		}
 		return auth.NewManager(credentials.Default()).AllStatusWithConfig(context.Background(), settings)
+	case "health_status":
+		provider, _ := args["provider"].(string)
+		settings, err := config.LoadFor("")
+		if err != nil {
+			return nil, err
+		}
+		if provider == "all" {
+			result := map[string]health.Result{}
+			for _, name := range []string{"qwen", "agy", "claude"} {
+				result[name] = health.Check(context.Background(), settings, name, credentials.Default())
+			}
+			return result, nil
+		}
+		if provider != "qwen" && provider != "agy" && provider != "claude" {
+			return nil, fmt.Errorf("unknown provider %q", provider)
+		}
+		return health.Check(context.Background(), settings, provider, credentials.Default()), nil
 	case "spawn_agent":
 		cwd, _ := args["cwd"].(string)
 		task, _ := args["task"].(string)
