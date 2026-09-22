@@ -21,6 +21,12 @@ npx @cheevatech/violin auth login qwen
 npx @cheevatech/violin auth set qwen-api < /path/to/qwen-api-key.txt
 ```
 
+The bundled public skill is a single `$violin` entrypoint covering delegation,
+implementation, review, and security. `skills install` migrates the previous
+managed `violin-implement`, `violin-review`, and `violin-security` directories
+after creating a backup. `$violin-external-delegation` remains an optional
+personal skill for installations that already provide it.
+
 The npm launcher downloads a platform-specific Go release binary and verifies
 its checksum before execution. Release targets are macOS/Linux on x64/arm64.
 Configuration changes are previewed by default and backups are created before
