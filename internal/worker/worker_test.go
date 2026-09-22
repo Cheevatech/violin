@@ -100,7 +100,7 @@ func TestRunAPITransportWritesResponsesReport(t *testing.T) {
 }
 
 func TestRunCLIReportsIdleTimeoutAfterProviderEvent(t *testing.T) {
-	options := Options{Backend: "claude", Workspace: t.TempDir(), Timeout: 5, IdleTimeout: 1}
+	options := Options{Backend: "claude", Workspace: t.TempDir(), Timeout: 5, IdleTimeout: 1, IdleTimeoutEnabled: true}
 	_, err := runCLI(context.Background(), []string{"/bin/sh", "-c", "printf '%s\\n' '\"type\":\"item.completed\"'; sleep 2"}, "task", options)
 	if err == nil {
 		t.Fatal("expected idle timeout")

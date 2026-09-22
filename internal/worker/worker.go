@@ -23,12 +23,20 @@ import (
 type Options struct {
 	Backend, Mode, Workspace, TaskFile string
 	Timeout, IdleTimeout               int
+	IdleTimeoutEnabled                 bool
 	baseline                           []string
 }
 
 type executionError struct {
 	status string
 	err    error
+}
+
+func idleChannel(timer *time.Timer) <-chan time.Time {
+	if timer == nil {
+		return nil
+	}
+	return timer.C
 }
 
 func (e executionError) Error() string { return e.err.Error() }
@@ -79,6 +87,10 @@ func Run(ctx context.Context, options Options) error {
 	cliCommand := backend.CLI.Command
 	if len(cliCommand) == 0 {
 		cliCommand = commandParts(backend.Command)
+	}
+	options.IdleTimeoutEnabled = true
+	if (backend.Transport == "api" || (backend.Transport == "auto" && len(cliCommand) == 0)) && (options.Backend == "qwen" || options.Backend == "agy") {
+		options.IdleTimeoutEnabled = false
 	}
 	if backend.Transport == "api" || (backend.Transport == "auto" && len(cliCommand) == 0) {
 		provider, err := providers.FromConfigProvider(ctx, settings, credentials.Default(), options.Backend)
@@ -183,8 +195,11 @@ func runCLI(parent context.Context, command []string, task string, options Optio
 	var waitErr error
 	hard := time.NewTimer(time.Duration(options.Timeout) * time.Second)
 	defer hard.Stop()
-	idle := time.NewTimer(time.Duration(options.IdleTimeout) * time.Second)
-	defer idle.Stop()
+	var idle *time.Timer
+	if options.IdleTimeoutEnabled && options.IdleTimeout > 0 {
+		idle = time.NewTimer(time.Duration(options.IdleTimeout) * time.Second)
+		defer idle.Stop()
+	}
 	var output, errorOutput []byte
 	for completed := 0; completed < 2 || waitCh != nil; {
 		select {
@@ -195,7 +210,7 @@ func runCLI(parent context.Context, command []string, task string, options Optio
 			} else {
 				errorOutput = result.data
 			}
-			if options.IdleTimeout > 0 {
+			if idle != nil {
 				if !idle.Stop() {
 					select {
 					case <-idle.C:
@@ -205,7 +220,7 @@ func runCLI(parent context.Context, command []string, task string, options Optio
 				idle.Reset(time.Duration(options.IdleTimeout) * time.Second)
 			}
 		case <-activity:
-			if options.IdleTimeout > 0 {
+			if idle != nil {
 				if !idle.Stop() {
 					select {
 					case <-idle.C:
@@ -223,7 +238,7 @@ func runCLI(parent context.Context, command []string, task string, options Optio
 		case <-hard.C:
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			return "", executionError{status: "timeout", err: fmt.Errorf("worker exceeded timeout of %d seconds", options.Timeout)}
-		case <-idle.C:
+		case <-idleChannel(idle):
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			return "", executionError{status: "idle_timeout", err: fmt.Errorf("worker exceeded idle timeout of %d seconds", options.IdleTimeout)}
 		}
@@ -358,7 +373,7 @@ func writeReport(options Options, started time.Time, status string, exitCode int
 	if idleTimeout < 1 {
 		idleTimeout = 1
 	}
-	idleEnabled := options.IdleTimeout > 0 && options.Backend != "qwen" && options.Backend != "agy"
+	idleEnabled := options.IdleTimeoutEnabled
 	const summaryLimit = 6000
 	summary := text
 	if len(summary) > summaryLimit {
@@ -437,7 +452,7 @@ func writeStatus(phase string, options Options, started time.Time) {
 	if idleTimeout < 1 {
 		idleTimeout = 1
 	}
-	idleEnabled := options.IdleTimeout > 0 && options.Backend != "qwen" && options.Backend != "agy"
+	idleEnabled := options.IdleTimeoutEnabled
 	data, _ := json.Marshal(map[string]any{"phase": phase, "pid": os.Getpid(), "elapsed_seconds": time.Since(started).Seconds(), "evidence": os.Getenv("VIOLIN_WORKER_EVIDENCE"), "effective_timeout_seconds": options.Timeout, "timeout_source": timeoutSource(options), "idle_timeout_seconds": idleTimeout, "idle_timeout_enabled": idleEnabled})
 	_ = os.WriteFile(path, data, 0600)
 }
