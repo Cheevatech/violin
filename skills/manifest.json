@@ -2,8 +2,6 @@
   "schema_version": 1,
   "language": "en",
   "skills": [
-    {"name": "violin-implement", "path": "violin-implement/SKILL.md"},
-    {"name": "violin-review", "path": "violin-review/SKILL.md"},
-    {"name": "violin-security", "path": "violin-security/SKILL.md"}
+    {"name": "violin", "path": "SKILL.md"}
   ]
 }

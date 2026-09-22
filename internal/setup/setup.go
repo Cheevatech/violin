@@ -25,6 +25,8 @@ const (
 	configEnd   = "# END VIOLIN CONFIG"
 )
 
+var legacySkillDirectories = []string{"violin-implement", "violin-review", "violin-security"}
+
 type Plan struct {
 	Action  string `json:"action"`
 	Target  string `json:"target"`
@@ -202,7 +204,7 @@ func SkillsPlan(sourceDir string, apply bool) (Plan, error) {
 		sourceDir = filepath.Join("skills")
 	}
 	target := filepath.Join(home, ".codex", "skills", "violin")
-	planning := Plan{Action: "skills_install", Target: target, Apply: apply, Changes: "install bundled Violin skills"}
+	planning := Plan{Action: "skills_install", Target: target, Apply: apply, Changes: "install unified Violin skill and migrate legacy skill directories"}
 	if !apply {
 		return planning, nil
 	}
@@ -223,6 +225,9 @@ func SkillsPlan(sourceDir string, apply bool) (Plan, error) {
 			return Plan{}, err
 		}
 		planning.Backup = backup
+		if err := removeLegacySkillDirectories(target); err != nil {
+			return Plan{}, err
+		}
 	}
 	if _, err := os.Stat(sourceDir); err == nil {
 		if err := copyTree(sourceDir, target); err != nil {
@@ -239,6 +244,21 @@ func SkillsPlan(sourceDir string, apply bool) (Plan, error) {
 		return Plan{}, err
 	}
 	return planning, nil
+}
+
+func removeLegacySkillDirectories(target string) error {
+	for _, name := range legacySkillDirectories {
+		path := filepath.Join(target, name)
+		if _, err := os.Lstat(path); os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		if err := os.RemoveAll(path); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func copyEmbeddedTree(target string) error {

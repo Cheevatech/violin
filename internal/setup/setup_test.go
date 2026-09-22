@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -65,9 +66,7 @@ func TestConfigPlanCreatesCredentialFreeTemplate(t *testing.T) {
 
 func TestEmbeddedSkillsDescribeCurrentGoMCPAndLayaContract(t *testing.T) {
 	checks := map[string][]string{
-		"assets/violin-implement/SKILL.md": {"Go-owned", "laya_route", "laya_wait_job"},
-		"assets/violin-review/SKILL.md":    {"supervisor heartbeat", "laya_wait_job", "explicit caller timeouts"},
-		"assets/violin-security/SKILL.md":  {"read-only/advisory", "arbitrary shell", "checksum"},
+		"assets/SKILL.md": {"name: violin", "laya_route", "laya_wait_job", "read-only/advisory", "checksum"},
 	}
 	for path, markers := range checks {
 		data, err := bundledSkills.ReadFile(path)
@@ -79,6 +78,89 @@ func TestEmbeddedSkillsDescribeCurrentGoMCPAndLayaContract(t *testing.T) {
 				t.Errorf("embedded skill %s missing marker %q", path, marker)
 			}
 		}
+	}
+}
+
+func TestEmbeddedManifestContainsOnlyUnifiedViolinSkill(t *testing.T) {
+	data, err := bundledSkills.ReadFile("assets/manifest.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest struct {
+		Skills []struct {
+			Name string `json:"name"`
+			Path string `json:"path"`
+		} `json:"skills"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Skills) != 1 || manifest.Skills[0].Name != "violin" || manifest.Skills[0].Path != "SKILL.md" {
+		t.Fatalf("manifest=%+v", manifest.Skills)
+	}
+}
+
+func TestRemoveLegacySkillDirectoriesOnlyTouchesKnownManagedPaths(t *testing.T) {
+	target := t.TempDir()
+	for _, name := range append(append([]string{}, legacySkillDirectories...), "custom") {
+		if err := os.MkdirAll(filepath.Join(target, name), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(target, name, "SKILL.md"), []byte(name), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := removeLegacySkillDirectories(target); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range legacySkillDirectories {
+		if _, err := os.Stat(filepath.Join(target, name)); !os.IsNotExist(err) {
+			t.Fatalf("legacy directory remains: %s (%v)", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(target, "custom", "SKILL.md")); err != nil {
+		t.Fatalf("custom skill was modified: %v", err)
+	}
+}
+
+func TestSkillsPlanMigratesManagedInstallWithBackup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	target := filepath.Join(home, ".codex", "skills", "violin")
+	if err := os.MkdirAll(filepath.Join(target, "violin-review"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "violin-review", "SKILL.md"), []byte("legacy"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, ".violin-managed"), []byte("managed\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(t.TempDir(), "skills")
+	if err := os.MkdirAll(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "SKILL.md"), []byte("name: violin"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "manifest.json"), []byte(`{"skills":[{"name":"violin","path":"SKILL.md"}]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := SkillsPlan(source, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Backup == "" {
+		t.Fatal("managed migration must create a backup")
+	}
+	if _, err := os.Stat(plan.Backup); err != nil {
+		t.Fatalf("backup missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "violin-review")); !os.IsNotExist(err) {
+		t.Fatalf("legacy skill remains: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(target, "SKILL.md")); err != nil || string(data) != "name: violin" {
+		t.Fatalf("unified skill not installed: data=%q err=%v", data, err)
 	}
 }
 
