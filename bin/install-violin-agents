@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 import shutil
+import subprocess
 import time
 import tomllib
 
@@ -23,6 +24,10 @@ def replace_block(text, block):
 
 def main():
     home = Path.home()
+    go = shutil.which('go')
+    go_binary = ROOT / 'bin' / 'violin'
+    if go:
+        subprocess.run([go, 'build', '-o', str(go_binary), './cmd/violin'], cwd=ROOT, check=True)
     config = home / ".codex/config.toml"
     guidance = home / ".codex/AGENTS.md"
     original = config.read_text() if config.exists() else ""
@@ -31,7 +36,7 @@ def main():
         raise ValueError("An unmanaged violin_agents server already exists")
     block = f'''{START}
 [mcp_servers.violin_agents]
-command = {json.dumps(str(ROOT / 'bin/violin-agent-server'))}
+command = {json.dumps(str(go_binary if go_binary.exists() else ROOT / 'bin/violin-agent-server'))}
 tool_timeout_sec = 60
 default_tools_approval_mode = "approve"
 {END}'''
@@ -80,8 +85,13 @@ claim native routing. Never copy the entire parent conversation into a worker.
     new_guidance = replace_block(old_guidance, policy)
     # Validate every destination before changing any global file.
     links = [(home / 'bin' / name, ROOT / 'bin' / name)
-             for name in ['violin-worker', 'violin-agent', 'violin_scheduler.py', 'violin-agent-server', 'violin-health',
+             for name in ['violin-worker', 'violin_scheduler.py', 'violin-agent-server', 'violin-health',
                            'violin-codex-qwen', 'violin-claude', 'qwen-mode', 'qwen-verify-gate']]
+    if go_binary.exists():
+        links.append((home / 'bin' / 'violin', go_binary))
+        links.append((home / 'bin' / 'violin-agent', go_binary))
+    else:
+        links.append((home / 'bin' / 'violin-agent', ROOT / 'bin' / 'violin-agent'))
     for dest, source in links:
         if dest.exists() and (not dest.is_symlink() or dest.resolve() != source):
             raise ValueError(f"Unmanaged executable exists: {dest}")

@@ -1,5 +1,28 @@
 # Qwen Global Workflow
 
+## Go control plane and managed Laya model
+
+The repository now contains a Go control-plane binary built with `make go-build`:
+
+```bash
+./bin/violin mcp
+./bin/violin run --backend auto -C /absolute/workspace --task-file /path/task
+./bin/violin model status
+./bin/violin model verify
+./bin/violin model update --manifest /path/manifest.json --source-dir /path/model-bundle
+```
+
+The Go binary owns MCP, job lifecycle, evidence descriptors, and model activation.
+The Laya multilingual model is a separately versioned artifact managed under the
+shared worker state directory; activation is atomic and checksum failures leave
+the current model untouched. Laya decisions are initially fallback-safe and can
+be rolled out from shadow to advisory to active mode without changing provider
+worker commands. A base Laya checkpoint must not be treated as production
+routing policy until violin has a domain-tuned, calibrated artifact and replay
+benchmarks; when no verified runtime is available, deterministic scheduler
+policy remains authoritative. The existing Python entrypoints remain available
+as a compatibility path during migration.
+
 ## External workers under Codex supervision
 
 `bin/violin-worker` runs Qwen through the existing Codex launcher, AGY with
