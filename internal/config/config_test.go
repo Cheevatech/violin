@@ -31,3 +31,14 @@ func TestDefaultsDoNotSelectLocalQwenRoute(t *testing.T) {
 		t.Fatalf("unsafe local default: %+v", backend)
 	}
 }
+
+func TestCLICommandEnvironmentOverride(t *testing.T) {
+	t.Setenv("VIOLIN_QWEN_CLI_COMMAND", `["custom-agent","--stdin"]`)
+	settings, err := loadFiles([]string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.Backend["qwen"].Transport != "cli" || settings.Backend["qwen"].CLI.Command[0] != "custom-agent" {
+		t.Fatalf("settings=%+v", settings.Backend["qwen"])
+	}
+}

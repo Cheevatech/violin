@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -134,6 +135,13 @@ func applyBackendEnv(c *Config) {
 		}
 		if value := os.Getenv(prefix + "API_KEY_ENV"); value != "" {
 			backend.API.APIKeyEnv = value
+		}
+		if value := os.Getenv(prefix + "CLI_COMMAND"); value != "" {
+			var command []string
+			if json.Unmarshal([]byte(value), &command) == nil && len(command) > 0 {
+				backend.CLI.Command = command
+				backend.Transport = "cli"
+			}
 		}
 		c.Backend[name] = backend
 	}
