@@ -65,6 +65,11 @@ func (e ManagedEngine) Evaluate(request Request) (Result, error) {
 	if result.ModelVersion == "" && status.Manifest != nil {
 		result.ModelVersion = status.Manifest.Version
 	}
+	decision, err := result.NormalizedDecision(request)
+	if err != nil {
+		return e.fallback(request, err)
+	}
+	result.Decision = &decision
 	return result, nil
 }
 

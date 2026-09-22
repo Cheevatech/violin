@@ -3,6 +3,7 @@ package laya
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -38,13 +39,135 @@ type Answer struct {
 	Confidence    float64            `json:"confidence"`
 	Fallback      bool               `json:"fallback"`
 }
-type Result struct {
-	Answers      []Answer `json:"answers"`
-	ModelVersion string   `json:"model_version"`
-	LatencyMS    float64  `json:"latency_ms"`
-	Fallback     bool     `json:"fallback"`
-	Error        string   `json:"error,omitempty"`
+
+type Risk string
+
+const (
+	RiskLow    Risk = "low"
+	RiskMedium Risk = "medium"
+	RiskHigh   Risk = "high"
+)
+
+type ExecutionTarget string
+
+const (
+	ExecutionLocal    ExecutionTarget = "local"
+	ExecutionExternal ExecutionTarget = "external"
+)
+
+type RetryHint struct {
+	MaxAttempts int `json:"max_attempts"`
+	BackoffSecs int `json:"backoff_seconds"`
 }
+
+type Decision struct {
+	BackendCandidates  []string        `json:"backend_candidates"`
+	TaskMode           string          `json:"task_mode"`
+	Risk               Risk            `json:"risk"`
+	TimeoutHintSeconds int             `json:"timeout_hint_seconds"`
+	IdleTimeoutEnabled bool            `json:"idle_timeout_enabled"`
+	Retry              RetryHint       `json:"retry_hint"`
+	ExecutionTarget    ExecutionTarget `json:"execution_target"`
+	Confidence         float64         `json:"confidence"`
+	Margin             float64         `json:"margin"`
+	ReasonCodes        []string        `json:"reason_codes"`
+	ModelVersion       string          `json:"model_version"`
+	Fallback           bool            `json:"fallback"`
+}
+
+func (d Decision) Validate() error {
+	if len(d.BackendCandidates) == 0 {
+		return errors.New("Laya decision requires backend candidates")
+	}
+	seen := map[string]bool{}
+	for _, backend := range d.BackendCandidates {
+		if backend != "agy" && backend != "qwen" && backend != "claude" {
+			return fmt.Errorf("unsupported Laya backend %q", backend)
+		}
+		if seen[backend] {
+			return fmt.Errorf("duplicate Laya backend %q", backend)
+		}
+		seen[backend] = true
+	}
+	if d.TaskMode != "inspect" && d.TaskMode != "implement" {
+		return fmt.Errorf("unsupported Laya task mode %q", d.TaskMode)
+	}
+	if d.Risk != RiskLow && d.Risk != RiskMedium && d.Risk != RiskHigh {
+		return fmt.Errorf("unsupported Laya risk %q", d.Risk)
+	}
+	if d.TimeoutHintSeconds < 1 {
+		return errors.New("Laya timeout hint must be positive")
+	}
+	if d.Retry.MaxAttempts < 1 || d.Retry.MaxAttempts > 3 || d.Retry.BackoffSecs < 0 {
+		return errors.New("Laya retry hint is outside safe bounds")
+	}
+	if d.ExecutionTarget != ExecutionLocal && d.ExecutionTarget != ExecutionExternal {
+		return fmt.Errorf("unsupported Laya execution target %q", d.ExecutionTarget)
+	}
+	if math.IsNaN(d.Confidence) || math.IsInf(d.Confidence, 0) || d.Confidence < 0 || d.Confidence > 1 {
+		return errors.New("Laya confidence must be between 0 and 1")
+	}
+	if math.IsNaN(d.Margin) || math.IsInf(d.Margin, 0) || d.Margin < 0 || d.Margin > 1 {
+		return errors.New("Laya margin must be between 0 and 1")
+	}
+	return nil
+}
+
+type Result struct {
+	Answers      []Answer  `json:"answers"`
+	Decision     *Decision `json:"decision,omitempty"`
+	ModelVersion string    `json:"model_version"`
+	LatencyMS    float64   `json:"latency_ms"`
+	Fallback     bool      `json:"fallback"`
+	Error        string    `json:"error,omitempty"`
+}
+
+func (r Result) NormalizedDecision(request Request) (Decision, error) {
+	if r.Decision != nil {
+		decision := *r.Decision
+		if decision.ModelVersion == "" {
+			decision.ModelVersion = r.ModelVersion
+		}
+		if err := decision.Validate(); err != nil {
+			return Decision{}, err
+		}
+		return decision, nil
+	}
+	for _, answer := range r.Answers {
+		if answer.ID != "backend" {
+			continue
+		}
+		backend, ok := answer.Value.(string)
+		if !ok || backend == "" {
+			break
+		}
+		decision := Decision{
+			BackendCandidates:  []string{backend},
+			TaskMode:           "inspect",
+			Risk:               RiskLow,
+			TimeoutHintSeconds: 900,
+			IdleTimeoutEnabled: true,
+			Retry:              RetryHint{MaxAttempts: 1},
+			ExecutionTarget:    ExecutionExternal,
+			Confidence:         answer.Confidence,
+			ModelVersion:       r.ModelVersion,
+			Fallback:           r.Fallback || answer.Fallback,
+		}
+		if request.State != nil {
+			if state, ok := request.State.(map[string]any); ok {
+				if mode, ok := state["mode"].(string); ok && (mode == "inspect" || mode == "implement") {
+					decision.TaskMode = mode
+				}
+			}
+		}
+		if err := decision.Validate(); err != nil {
+			return Decision{}, err
+		}
+		return decision, nil
+	}
+	return Decision{}, errors.New("Laya result has no decision")
+}
+
 type Engine interface{ Evaluate(Request) (Result, error) }
 
 var ErrUnavailable = errors.New("laya model unavailable")
@@ -84,5 +207,13 @@ func (e FallbackEngine) Evaluate(request Request) (Result, error) {
 		}
 		result.Answers = append(result.Answers, answer)
 	}
+	backend := "qwen"
+	if len(request.Questions) > 0 {
+		backend = request.Questions[0].Fallback
+		if backend == "" && len(request.Questions[0].Options) > 0 {
+			backend = request.Questions[0].Options[0]
+		}
+	}
+	result.Decision = &Decision{BackendCandidates: []string{backend}, TaskMode: "inspect", Risk: RiskLow, TimeoutHintSeconds: 900, IdleTimeoutEnabled: true, Retry: RetryHint{MaxAttempts: 1}, ExecutionTarget: ExecutionExternal, Confidence: 0, Fallback: true, ModelVersion: e.ModelVersion}
 	return result, nil
 }

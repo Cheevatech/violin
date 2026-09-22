@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,7 +52,14 @@ func TestManagedEngineUsesVerifiedModelRunnerAndKeepsModelPathSeparate(t *testin
 	}
 	runner := []string{"/bin/sh", "-c", "test -n \"$VIOLIN_LAYA_MODEL_DIR\" && printf '%s' '{\"model_version\":\"v1\",\"answers\":[{\"id\":\"backend\",\"kind\":\"choice\",\"value\":\"qwen\",\"confidence\":0.9,\"fallback\":false}]}'"}
 	result, err := (ManagedEngine{Manager: manager, Runner: runner, Fallback: FallbackEngine{}}).Evaluate(Request{Language: ProtocolLanguage, Questions: []Question{{ID: "backend", Kind: Choice, Options: []string{"qwen"}}}})
-	if err != nil || result.Fallback || result.ModelVersion != "v1" || len(result.Answers) != 1 {
+	if err != nil || result.Fallback || result.ModelVersion != "v1" || len(result.Answers) != 1 || result.Decision == nil {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestManagedEngineRejectsInvalidDecision(t *testing.T) {
+	result, err := (ManagedEngine{Runner: []string{"/bin/sh", "-c", "printf '%s' '{\"decision\":{\"backend_candidates\":[\"unknown\"],\"task_mode\":\"inspect\",\"risk\":\"low\",\"timeout_hint_seconds\":900,\"retry_hint\":{\"max_attempts\":1},\"execution_target\":\"external\",\"confidence\":0,\"margin\":0}}'"}, Fallback: FallbackEngine{}}).Evaluate(Request{Language: ProtocolLanguage, Questions: []Question{{ID: "backend", Kind: Choice, Options: []string{"qwen"}, Fallback: "qwen"}}})
+	if err != nil || !result.Fallback || !strings.Contains(result.Error, "unsupported Laya backend") {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }
