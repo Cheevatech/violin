@@ -4,6 +4,7 @@
 
 [backend.qwen]
 transport = "cli"
+idle_timeout_enabled = false
 
 [backend.qwen.cli]
 command = ["codex", "-c", "model=\"qwen3.8-27b\"", "-c", "model_provider=\"violin_lan\""]

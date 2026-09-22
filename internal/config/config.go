@@ -16,14 +16,15 @@ type Timeouts struct {
 }
 
 type Backend struct {
-	MaxConcurrency int    `toml:"max_concurrency" json:"max_concurrency"`
-	Command        any    `toml:"command" json:"command,omitempty"`
-	Protocol       string `toml:"protocol" json:"protocol"`
-	Stdin          bool   `toml:"stdin" json:"stdin"`
-	HealthCommand  any    `toml:"health_command" json:"health_command,omitempty"`
-	Transport      string `toml:"transport" json:"transport,omitempty"`
-	CLI            CLI    `toml:"cli" json:"cli,omitempty"`
-	API            API    `toml:"api" json:"api,omitempty"`
+	MaxConcurrency     int    `toml:"max_concurrency" json:"max_concurrency"`
+	Command            any    `toml:"command" json:"command,omitempty"`
+	Protocol           string `toml:"protocol" json:"protocol"`
+	Stdin              bool   `toml:"stdin" json:"stdin"`
+	HealthCommand      any    `toml:"health_command" json:"health_command,omitempty"`
+	Transport          string `toml:"transport" json:"transport,omitempty"`
+	CLI                CLI    `toml:"cli" json:"cli,omitempty"`
+	API                API    `toml:"api" json:"api,omitempty"`
+	IdleTimeoutEnabled *bool  `toml:"idle_timeout_enabled" json:"idle_timeout_enabled,omitempty"`
 }
 
 type CLI struct {
@@ -145,6 +146,17 @@ func applyBackendEnv(c *Config) {
 		}
 		c.Backend[name] = backend
 	}
+}
+
+func IdleTimeoutEnabled(name string, backend Backend) bool {
+	if backend.IdleTimeoutEnabled != nil {
+		return *backend.IdleTimeoutEnabled
+	}
+	builtIn := backend.Transport == "api" || (backend.Transport == "auto" && len(backend.CLI.Command) == 0 && backend.Command == nil)
+	if builtIn && (name == "qwen" || name == "agy") {
+		return false
+	}
+	return true
 }
 
 func atoi(value string, fallback int) int {

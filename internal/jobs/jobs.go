@@ -177,7 +177,7 @@ func Spawn(o Options) (*Job, error) {
 	}
 	_ = stdout.Close()
 	_ = stderr.Close()
-	d := Descriptor{AgentID: fmt.Sprintf("%d-%d", time.Now().UnixNano(), cmd.Process.Pid), Backend: o.Backend, RequestedBackend: o.RequestedBackend, PID: cmd.Process.Pid, Evidence: run, Output: outputPath, Status: statusPath, TaskFile: taskPath, Mode: o.Mode, Timeout: o.Timeout, TimeoutSource: o.TimeoutSource, IdleTimeout: o.IdleTimeout, IdleEnabled: !(o.Backend == "agy" || o.Backend == "qwen"), OwnerPID: os.Getpid(), CreatedAt: time.Now(), LayaMode: os.Getenv("VIOLIN_LAYA_MODE"), LayaFallback: decision.Fallback, LayaModelVersion: decision.ModelVersion, LayaError: decision.Error}
+	d := Descriptor{AgentID: fmt.Sprintf("%d-%d", time.Now().UnixNano(), cmd.Process.Pid), Backend: o.Backend, RequestedBackend: o.RequestedBackend, PID: cmd.Process.Pid, Evidence: run, Output: outputPath, Status: statusPath, TaskFile: taskPath, Mode: o.Mode, Timeout: o.Timeout, TimeoutSource: o.TimeoutSource, IdleTimeout: o.IdleTimeout, IdleEnabled: config.IdleTimeoutEnabled(o.Backend, cfg.Backend[o.Backend]), OwnerPID: os.Getpid(), CreatedAt: time.Now(), LayaMode: os.Getenv("VIOLIN_LAYA_MODE"), LayaFallback: decision.Fallback, LayaModelVersion: decision.ModelVersion, LayaError: decision.Error}
 	if d.LayaMode == "" {
 		d.LayaMode = "shadow"
 	}

@@ -88,10 +88,7 @@ func Run(ctx context.Context, options Options) error {
 	if len(cliCommand) == 0 {
 		cliCommand = commandParts(backend.Command)
 	}
-	options.IdleTimeoutEnabled = true
-	if (backend.Transport == "api" || (backend.Transport == "auto" && len(cliCommand) == 0)) && (options.Backend == "qwen" || options.Backend == "agy") {
-		options.IdleTimeoutEnabled = false
-	}
+	options.IdleTimeoutEnabled = config.IdleTimeoutEnabled(options.Backend, backend)
 	if backend.Transport == "api" || (backend.Transport == "auto" && len(cliCommand) == 0) {
 		provider, err := providers.FromConfigProvider(ctx, settings, credentials.Default(), options.Backend)
 		if err != nil {

@@ -42,3 +42,16 @@ func TestCLICommandEnvironmentOverride(t *testing.T) {
 		t.Fatalf("settings=%+v", settings.Backend["qwen"])
 	}
 }
+
+func TestIdleTimeoutPolicyCanDeclareBuiltInCLI(t *testing.T) {
+	settings := Defaults()
+	qwen := settings.Backend["qwen"]
+	qwen.Transport = "cli"
+	qwen.CLI.Command = []string{"violin-codex-qwen"}
+	disabled := false
+	qwen.IdleTimeoutEnabled = &disabled
+	settings.Backend["qwen"] = qwen
+	if IdleTimeoutEnabled("qwen", settings.Backend["qwen"]) {
+		t.Fatal("built-in qwen CLI should not use idle timeout")
+	}
+}
