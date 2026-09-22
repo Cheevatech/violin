@@ -1,0 +1,11 @@
+# Opt-in compatibility profile for the original self-hosted Qwen route.
+# Do not use this as a public default. Set VIOLIN_LLMUX_API_KEY through the
+# environment or the existing OS keychain entry before using it.
+
+[backend.qwen]
+transport = "cli"
+
+[backend.qwen.cli]
+command = ["codex", "-c", "model=\"qwen3.8-27b\"", "-c", "model_provider=\"violin_lan\""]
+status_command = ["codex", "login", "status"]
+login_command = ["codex", "login"]

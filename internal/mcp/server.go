@@ -11,6 +11,7 @@ import (
 	"strconv"
 
 	"github.com/film/violin/internal/auth"
+	"github.com/film/violin/internal/config"
 	"github.com/film/violin/internal/credentials"
 	"github.com/film/violin/internal/jobs"
 )
@@ -89,7 +90,11 @@ func call(params map[string]any) (any, error) {
 	}
 	switch name {
 	case "auth_status":
-		return auth.NewManager(credentials.Default()).AllStatus(context.Background())
+		settings, err := config.LoadFor("")
+		if err != nil {
+			return nil, err
+		}
+		return auth.NewManager(credentials.Default()).AllStatusWithConfig(context.Background(), settings)
 	case "spawn_agent":
 		cwd, _ := args["cwd"].(string)
 		task, _ := args["task"].(string)
@@ -99,6 +104,9 @@ func call(params map[string]any) (any, error) {
 		idle, _ := intArg(args, "idle_timeout_seconds")
 		job, err := jobs.Spawn(jobs.Options{Root: root, Workspace: cwd, Backend: backend, RequestedBackend: backend, Mode: mode, Task: task, Timeout: timeout, TimeoutSource: timeoutSource, IdleTimeout: idle})
 		if err != nil {
+			if required, ok := err.(jobs.AuthRequiredError); ok {
+				return required.Details(), nil
+			}
 			return nil, err
 		}
 		return job.Live(), nil

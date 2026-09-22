@@ -12,6 +12,7 @@ npx violin skills install --apply
 npx violin auth status all
 npx violin auth login claude
 npx violin auth login qwen
+npx violin auth set qwen-api < /path/to/qwen-api-key.txt
 ```
 
 The npm launcher downloads a platform-specific Go release binary and verifies
@@ -31,6 +32,10 @@ session. Claude uses `claude auth login`; Qwen uses `codex login`; AGY has no
 CLI login command and must use `VIOLIN_AGY_API_KEY` or the OS keychain. MCP can
 read `auth_status` without exposing credentials. Login is explicit and is not
 started automatically by an MCP request.
+
+Qwen has generic `cli`, `api`, and `auto` transports. Public defaults do not
+select an endpoint, model, or local provider. The original self-hosted route is
+available only as an opt-in example profile under `examples/profiles/`.
 
 The repository now contains a Go control-plane binary built with `make go-build`:
 
@@ -89,8 +94,11 @@ the task. Nonzero exits, missing results, backend errors, and timeouts fail the
 run. The report follows `schemas/worker-report.schema.json`. No automatic
 retry occurs, and a partial Qwen implementation is never retried on AGY.
 
-`~/.config/violin-agents/config.toml` configures scheduler order, session and
-machine limits, backend limits, and executable paths. `VIOLIN_CONFIG`, the
+`~/.config/violin/config.toml` configures scheduler order, session and machine
+limits, backend transport/auth policy, backend limits, and executable paths.
+The legacy `~/.config/violin-agents/config.toml` remains supported during
+migration, and `<workspace>/.violin/config.toml` can override non-secret project
+policy. `VIOLIN_CONFIG`, the
 `VIOLIN_*_MAX_CONCURRENCY` variables, `VIOLIN_BACKEND_ORDER`, and backend bin
 variables override the file. The CLI facade supports `run`, `list`, `wait`,
 `interrupt`, and `config show|validate`:
@@ -134,8 +142,9 @@ the built-in launcher path. Supported placeholders are
 `{workspace}`, `{task_file}`, `{result_file}`, `{prompt}`, `{mode}`,
 `{timeout}`, and `{idle_timeout}`. Set `protocol` to `text` or `json` for a
 generic CLI such as Hermes; `stdin = true` sends the generated task prompt on
-stdin. With no override, the Qwen backend uses the pinned Codex profile
-`qwen3.8-27b` through `violin_lan`.
+stdin. Public defaults do not select a Qwen endpoint or model. The original
+`qwen3.8-27b` through `violin_lan` route is an opt-in compatibility profile in
+`examples/profiles/violin-lan-qwen.toml`.
 
 ```toml
 [backend.qwen]

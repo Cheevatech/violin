@@ -1,0 +1,7 @@
+# Project-local policy overrides only. Never put provider API keys here.
+
+[backend.qwen]
+transport = "auto"
+
+[timeouts]
+max_seconds = 14400

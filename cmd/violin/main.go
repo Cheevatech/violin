@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/film/violin/internal/auth"
 	"github.com/film/violin/internal/config"
@@ -66,30 +68,44 @@ func usage() {
 
 func authCommand(args []string) error {
 	if len(args) < 2 {
-		return errors.New("auth requires status/login and provider")
+		return errors.New("auth requires status/login/set/remove and provider")
 	}
 	manager := auth.NewManager(credentials.Default())
 	provider := args[1]
 	if args[0] == "status" {
+		settings, err := config.LoadFor("")
+		if err != nil {
+			return err
+		}
 		if provider == "all" {
-			result := map[string]any{}
-			for _, name := range []string{"qwen", "agy", "claude"} {
-				status, err := manager.Status(context.Background(), name)
-				if err != nil {
-					return err
-				}
-				result[name] = status
+			result, err := manager.AllStatusWithConfig(context.Background(), settings)
+			if err != nil {
+				return err
 			}
 			return printJSON(result)
 		}
-		status, err := manager.Status(context.Background(), provider)
+		status, err := manager.StatusWithBackend(context.Background(), provider, settings.Backend[provider])
 		if err != nil {
 			return err
 		}
 		return printJSON(status)
 	}
 	if args[0] == "login" {
-		return manager.Login(context.Background(), provider)
+		settings, err := config.LoadFor("")
+		if err != nil {
+			return err
+		}
+		return manager.LoginWithBackend(context.Background(), provider, settings.Backend[provider])
+	}
+	if args[0] == "set" {
+		value, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil && len(value) == 0 {
+			return err
+		}
+		return manager.SetAPIKey(context.Background(), provider, strings.TrimSpace(value))
+	}
+	if args[0] == "remove" {
+		return manager.RemoveAPIKey(context.Background(), provider)
 	}
 	return errors.New("auth requires status or login")
 }

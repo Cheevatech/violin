@@ -37,3 +37,24 @@ func TestLookupDoesNotReturnSecretInMissingError(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestSetAndRemoveUseKeychainWithoutReadingEnvironment(t *testing.T) {
+	var savedService, savedValue string
+	removed := ""
+	store := Store{
+		SetKeychain: func(_ context.Context, service, value string) error {
+			savedService, savedValue = service, value
+			return nil
+		},
+		DeleteKeychain: func(_ context.Context, service string) error { removed = service; return nil },
+	}
+	if err := store.Set(context.Background(), "violin/qwen/api-key", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if savedService != "violin/qwen/api-key" || savedValue != "secret" {
+		t.Fatalf("service=%q value=%q", savedService, savedValue)
+	}
+	if err := store.Remove(context.Background(), savedService); err != nil || removed != savedService {
+		t.Fatalf("removed=%q err=%v", removed, err)
+	}
+}

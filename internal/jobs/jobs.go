@@ -1,6 +1,7 @@
 package jobs
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,7 +13,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/film/violin/internal/auth"
 	"github.com/film/violin/internal/config"
+	"github.com/film/violin/internal/credentials"
 	"github.com/film/violin/internal/laya"
 	"github.com/film/violin/internal/models"
 )
@@ -49,8 +52,20 @@ type Job struct {
 	cmd        *exec.Cmd
 }
 
+type AuthRequiredError struct {
+	Backend   string
+	Transport string
+	Action    string
+	Message   string
+}
+
+func (e AuthRequiredError) Error() string { return "auth_required: " + e.Message }
+func (e AuthRequiredError) Details() map[string]any {
+	return map[string]any{"status": "auth_required", "backend": e.Backend, "transport": e.Transport, "scope": "user", "action": e.Action, "message": e.Message}
+}
+
 func Spawn(o Options) (*Job, error) {
-	cfg, err := config.Load("")
+	cfg, err := config.LoadFor(o.Workspace)
 	if err != nil {
 		return nil, err
 	}
@@ -79,13 +94,35 @@ func Spawn(o Options) (*Job, error) {
 		}
 	}
 	if o.Backend == "auto" {
-		o.Backend, err = selectBackend(o.Root, cfg.Scheduler.Order, cfg.Backend)
+		order := cfg.Scheduler.Order
+		if len(order) == 0 {
+			order = []string{"agy", "qwen", "claude"}
+		}
+		readyOrder := make([]string, 0, len(order))
+		var authError error
+		for _, candidate := range order {
+			candidateError := checkAuth(candidate, cfg.Backend[candidate])
+			if candidateError != nil {
+				if authError == nil {
+					authError = candidateError
+				}
+				continue
+			}
+			readyOrder = append(readyOrder, candidate)
+		}
+		if len(readyOrder) == 0 && authError != nil {
+			return nil, authError
+		}
+		o.Backend, err = selectBackend(o.Root, readyOrder, cfg.Backend)
 		if err != nil {
 			return nil, err
 		}
 	}
 	if o.Backend != "agy" && o.Backend != "qwen" && o.Backend != "claude" {
 		return nil, errors.New("invalid backend")
+	}
+	if authError := checkAuth(o.Backend, cfg.Backend[o.Backend]); authError != nil {
+		return nil, authError
 	}
 	if o.Timeout <= 0 {
 		o.Timeout = cfg.Timeouts.Defaults[o.Mode]
@@ -145,6 +182,21 @@ func Spawn(o Options) (*Job, error) {
 		return nil, err
 	}
 	return j, nil
+}
+
+func checkAuth(provider string, backend config.Backend) error {
+	// Configured legacy/custom workers own their authentication contract.
+	if backend.Command != nil || backend.Transport == "" {
+		return nil
+	}
+	status, err := auth.NewManager(credentials.Default()).StatusWithBackend(context.Background(), provider, backend)
+	if err != nil {
+		return err
+	}
+	if status.Authenticated {
+		return nil
+	}
+	return AuthRequiredError{Backend: provider, Transport: backend.Transport, Action: status.Action, Message: status.Message}
 }
 
 func Open(root, id string) (*Job, error) {
