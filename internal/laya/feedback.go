@@ -18,6 +18,8 @@ type FeedbackEvent struct {
 	Fallback         bool      `json:"fallback"`
 	Confidence       float64   `json:"confidence"`
 	Risk             Risk      `json:"risk,omitempty"`
+	CostTier         Tier      `json:"cost_tier,omitempty"`
+	LatencyTier      Tier      `json:"latency_tier,omitempty"`
 	Outcome          string    `json:"outcome"`
 	DurationSeconds  float64   `json:"duration_seconds,omitempty"`
 	TimeoutSeconds   int       `json:"timeout_seconds"`

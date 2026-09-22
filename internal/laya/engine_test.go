@@ -129,7 +129,7 @@ func TestManagedEngineUsesBuiltinVerifiedClassifier(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := (ManagedEngine{Manager: manager, Fallback: FallbackEngine{}}).Evaluate(Request{Language: ProtocolLanguage, State: map[string]any{"task": "implement the fix"}})
-	if err != nil || result.Fallback || result.Decision == nil || result.Decision.BackendCandidates[0] != "qwen" || result.Decision.TaskMode != "implement" {
+	if err != nil || result.Fallback || result.Decision == nil || result.Decision.BackendCandidates[0] != "qwen" || result.Decision.TaskMode != "implement" || result.Decision.CostTier == "" || result.Decision.LatencyTier == "" {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }

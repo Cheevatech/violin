@@ -55,6 +55,14 @@ const (
 	ExecutionExternal ExecutionTarget = "external"
 )
 
+type Tier string
+
+const (
+	TierLow    Tier = "low"
+	TierMedium Tier = "medium"
+	TierHigh   Tier = "high"
+)
+
 type RetryHint struct {
 	MaxAttempts int `json:"max_attempts"`
 	BackoffSecs int `json:"backoff_seconds"`
@@ -68,6 +76,8 @@ type Decision struct {
 	IdleTimeoutEnabled bool            `json:"idle_timeout_enabled"`
 	Retry              RetryHint       `json:"retry_hint"`
 	ExecutionTarget    ExecutionTarget `json:"execution_target"`
+	CostTier           Tier            `json:"cost_tier"`
+	LatencyTier        Tier            `json:"latency_tier"`
 	Confidence         float64         `json:"confidence"`
 	Margin             float64         `json:"margin"`
 	ReasonCodes        []string        `json:"reason_codes"`
@@ -103,6 +113,12 @@ func (d Decision) Validate() error {
 	}
 	if d.ExecutionTarget != ExecutionLocal && d.ExecutionTarget != ExecutionExternal {
 		return fmt.Errorf("unsupported Laya execution target %q", d.ExecutionTarget)
+	}
+	if d.CostTier != TierLow && d.CostTier != TierMedium && d.CostTier != TierHigh {
+		return fmt.Errorf("unsupported Laya cost tier %q", d.CostTier)
+	}
+	if d.LatencyTier != TierLow && d.LatencyTier != TierMedium && d.LatencyTier != TierHigh {
+		return fmt.Errorf("unsupported Laya latency tier %q", d.LatencyTier)
 	}
 	if math.IsNaN(d.Confidence) || math.IsInf(d.Confidence, 0) || d.Confidence < 0 || d.Confidence > 1 {
 		return errors.New("Laya confidence must be between 0 and 1")
@@ -149,6 +165,8 @@ func (r Result) NormalizedDecision(request Request) (Decision, error) {
 			IdleTimeoutEnabled: true,
 			Retry:              RetryHint{MaxAttempts: 1},
 			ExecutionTarget:    ExecutionExternal,
+			CostTier:           TierMedium,
+			LatencyTier:        TierMedium,
 			Confidence:         answer.Confidence,
 			ModelVersion:       r.ModelVersion,
 			Fallback:           r.Fallback || answer.Fallback,
@@ -214,6 +232,6 @@ func (e FallbackEngine) Evaluate(request Request) (Result, error) {
 			backend = request.Questions[0].Options[0]
 		}
 	}
-	result.Decision = &Decision{BackendCandidates: []string{backend}, TaskMode: "inspect", Risk: RiskLow, TimeoutHintSeconds: 900, IdleTimeoutEnabled: true, Retry: RetryHint{MaxAttempts: 1}, ExecutionTarget: ExecutionExternal, Confidence: 0, Fallback: true, ModelVersion: e.ModelVersion}
+	result.Decision = &Decision{BackendCandidates: []string{backend}, TaskMode: "inspect", Risk: RiskLow, TimeoutHintSeconds: 900, IdleTimeoutEnabled: true, Retry: RetryHint{MaxAttempts: 1}, ExecutionTarget: ExecutionExternal, CostTier: TierMedium, LatencyTier: TierMedium, Confidence: 0, Fallback: true, ModelVersion: e.ModelVersion}
 	return result, nil
 }
