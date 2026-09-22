@@ -59,6 +59,9 @@ func (m *Manager) Install(manifest Manifest, sourceDir string, activate bool) er
 	if manifest.ID == "" || manifest.Version == "" || len(manifest.Artifacts) == 0 {
 		return errors.New("model manifest requires id, version, and artifacts")
 	}
+	if _, err := safeVersion(manifest.Version); err != nil {
+		return err
+	}
 	if strings.ToLower(strings.TrimSpace(manifest.Language)) != DefaultLanguage {
 		return fmt.Errorf("unsupported Laya model language %q: Violin requires English (en)", manifest.Language)
 	}
@@ -162,6 +165,9 @@ func (m *Manager) Verify() error {
 	return nil
 }
 func (m *Manager) Rollback(version string) error {
+	if _, err := safeVersion(version); err != nil {
+		return err
+	}
 	if _, err := m.readManifest(version); err != nil {
 		return err
 	}
@@ -208,9 +214,15 @@ func (m *Manager) activeVersion() (string, error) {
 	if value == "" {
 		return "", errors.New("active model is empty")
 	}
+	if _, err := safeVersion(value); err != nil {
+		return "", err
+	}
 	return value, nil
 }
 func (m *Manager) readManifest(version string) (*Manifest, error) {
+	if _, err := safeVersion(version); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(filepath.Join(m.versions, version, "manifest.json"))
 	if err != nil {
 		return nil, err
@@ -270,4 +282,11 @@ func safeRelativePath(value string) (string, error) {
 		return "", fmt.Errorf("unsafe model artifact path: %q", value)
 	}
 	return clean, nil
+}
+
+func safeVersion(value string) (string, error) {
+	if strings.TrimSpace(value) == "" || value == "." || value == ".." || strings.ContainsAny(value, `/\\`) {
+		return "", fmt.Errorf("unsafe model version: %q", value)
+	}
+	return value, nil
 }

@@ -70,3 +70,23 @@ func TestVerifyRejectsTamperedArtifact(t *testing.T) {
 		t.Fatal("expected checksum failure")
 	}
 }
+
+func TestModelVersionPathsRejectTraversal(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	_ = os.Mkdir(source, 0700)
+	_ = os.WriteFile(filepath.Join(source, "model.bin"), []byte("model"), 0600)
+	m, _ := NewManager(filepath.Join(root, "models"))
+	for _, version := range []string{"../escape", `..\escape`, "/absolute", ""} {
+		err := m.Install(Manifest{ID: DefaultModelID, Version: version, Language: DefaultLanguage, Artifacts: []Artifact{{Path: "model.bin"}}}, source, false)
+		if err == nil {
+			t.Fatalf("expected unsafe version rejection for %q", version)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "models", "active"), []byte("../escape\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.ActivePath(); err == nil {
+		t.Fatal("expected unsafe active version rejection")
+	}
+}
