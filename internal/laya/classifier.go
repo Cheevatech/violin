@@ -88,6 +88,8 @@ func (m Model) Evaluate(request Request) (Result, error) {
 		IdleTimeoutEnabled: backend.label == "claude",
 		Retry:              RetryHint{MaxAttempts: 1},
 		ExecutionTarget:    ExecutionExternal,
+		CostTier:           costTier(backend.label),
+		LatencyTier:        latencyTier(backend.label),
 		Confidence:         backend.confidence,
 		Margin:             backend.margin,
 		ReasonCodes:        reasonCodes(features, backend.label, mode.label, risk.label),
@@ -97,6 +99,20 @@ func (m Model) Evaluate(request Request) (Result, error) {
 		return Result{}, err
 	}
 	return Result{Decision: &decision, ModelVersion: m.Version}, nil
+}
+
+func costTier(backend string) Tier {
+	if backend == "claude" {
+		return TierHigh
+	}
+	return TierMedium
+}
+
+func latencyTier(backend string) Tier {
+	if backend == "qwen" {
+		return TierMedium
+	}
+	return TierLow
 }
 
 type prediction struct {

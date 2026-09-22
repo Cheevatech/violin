@@ -296,6 +296,7 @@ func (j *Job) finish() (map[string]any, error) {
 		AgentID: j.Descriptor.AgentID, RequestedBackend: j.Descriptor.RequestedBackend, SelectedBackend: j.Descriptor.Backend,
 		Mode: j.Descriptor.Mode, LayaMode: j.Descriptor.LayaMode, ModelVersion: j.Descriptor.LayaModelVersion,
 		Fallback: j.Descriptor.LayaFallback, Confidence: decisionConfidence(j.Descriptor.LayaDecision), Risk: decisionRisk(j.Descriptor.LayaDecision),
+		CostTier: decisionCost(j.Descriptor.LayaDecision), LatencyTier: decisionLatency(j.Descriptor.LayaDecision),
 		Outcome: reportOutcome(value), DurationSeconds: reportDuration(value), TimeoutSeconds: j.Descriptor.Timeout,
 		ErrorClass: reportErrorClass(value),
 	})
@@ -315,6 +316,20 @@ func decisionRisk(decision *laya.Decision) laya.Risk {
 		return ""
 	}
 	return decision.Risk
+}
+
+func decisionCost(decision *laya.Decision) laya.Tier {
+	if decision == nil {
+		return ""
+	}
+	return decision.CostTier
+}
+
+func decisionLatency(decision *laya.Decision) laya.Tier {
+	if decision == nil {
+		return ""
+	}
+	return decision.LatencyTier
 }
 
 func reportOutcome(value map[string]any) string {
