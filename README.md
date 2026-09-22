@@ -5,19 +5,19 @@
 Install the public launcher without installing Go or Python:
 
 ```bash
-npx @film/violin doctor
-npx @film/violin init --dry-run
-npx @film/violin init --apply
-npx @film/violin uninstall --dry-run
-npx @film/violin uninstall --apply
-npx @film/violin config init --dry-run
-npx @film/violin config init --apply
-npx @film/violin skills install --apply
-npx @film/violin auth status all
-npx @film/violin health all
-npx @film/violin auth login claude
-npx @film/violin auth login qwen
-npx @film/violin auth set qwen-api < /path/to/qwen-api-key.txt
+npx @cheevatech/violin doctor
+npx @cheevatech/violin init --dry-run
+npx @cheevatech/violin init --apply
+npx @cheevatech/violin uninstall --dry-run
+npx @cheevatech/violin uninstall --apply
+npx @cheevatech/violin config init --dry-run
+npx @cheevatech/violin config init --apply
+npx @cheevatech/violin skills install --apply
+npx @cheevatech/violin auth status all
+npx @cheevatech/violin health all
+npx @cheevatech/violin auth login claude
+npx @cheevatech/violin auth login qwen
+npx @cheevatech/violin auth set qwen-api < /path/to/qwen-api-key.txt
 ```
 
 The npm launcher downloads a platform-specific Go release binary and verifies
