@@ -305,6 +305,25 @@ func (j *Job) Interrupt() (map[string]any, error) {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
+	outputData, outputErr := os.ReadFile(j.Descriptor.Output)
+	var outputValue map[string]any
+	if outputErr != nil || len(outputData) == 0 || json.Unmarshal(outputData, &outputValue) != nil || outputValue["status"] == nil {
+		value := map[string]any{
+			"status": "interrupted", "backend": j.Descriptor.Backend, "exit_code": 130,
+			"phase": "interrupted", "evidence": j.Descriptor.Evidence,
+			"effective_timeout_seconds": j.Descriptor.Timeout, "timeout_source": j.Descriptor.TimeoutSource,
+			"idle_timeout_seconds": j.Descriptor.IdleTimeout, "idle_timeout_enabled": j.Descriptor.IdleEnabled,
+			"metadata_status": "not_applicable", "smoke_status": "not_applicable",
+			"final_message_seen": false, "changed_files": []string{}, "git_diff_check": map[string]any{"status": "not_run"},
+			"error_message": "worker interrupted", "summary": "", "supervisor_review_required": true,
+		}
+		data, _ := json.Marshal(value)
+		_ = os.WriteFile(j.Descriptor.Output, data, 0600)
+		_ = os.WriteFile(filepath.Join(j.Descriptor.Evidence, "report.json"), data, 0600)
+		status := map[string]any{"phase": "interrupted", "pid": j.Descriptor.PID, "evidence": j.Descriptor.Evidence, "effective_timeout_seconds": j.Descriptor.Timeout, "timeout_source": j.Descriptor.TimeoutSource, "idle_timeout_seconds": j.Descriptor.IdleTimeout, "idle_timeout_enabled": j.Descriptor.IdleEnabled}
+		statusData, _ := json.Marshal(status)
+		_ = os.WriteFile(j.Descriptor.Status, statusData, 0600)
+	}
 	value, _ := j.finish()
 	return value, nil
 }
