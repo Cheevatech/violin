@@ -273,6 +273,31 @@ print(json.dumps({'type':'turn.completed'}))
             result = subprocess.run([str(checker), str(cache)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0)
 
+    def test_qwen_launcher_finds_metadata_checker_from_bin_and_installed_symlink(self):
+        repo = Path(__file__).resolve().parents[1]
+        launcher = repo / "bin/violin-codex-qwen"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache = root / "models.json"
+            cache.write_text(json.dumps({"fetched_at": "2099-01-01T00:00:00Z", "models": [{
+                "slug": "qwen3.8-27b", "context_window": 200000,
+                "supported_reasoning_levels": [{"effort": "medium"}],
+                "supported_in_api": True, "provider": "violin_lan", "wire_api": "responses"}]}))
+            fake_codex = root / "codex"
+            fake_codex.write_text("#!/bin/sh\nprintf '%s\\n' QWEN_LAUNCHER_OK\n")
+            fake_codex.chmod(0o700)
+            installed_launcher = root / "violin-codex-qwen"
+            installed_launcher.symlink_to(launcher)
+            (root / "violin-qwen-metadata").symlink_to(repo / "bin/violin-qwen-metadata")
+            env = dict(os.environ, VIOLIN_CODEX_BIN=str(fake_codex),
+                       VIOLIN_CODEX_MODELS_CACHE=str(cache), LLMUX_API_KEY="offline-test")
+            for entrypoint in (launcher, installed_launcher):
+                with self.subTest(entrypoint=str(entrypoint)):
+                    result = subprocess.run([str(entrypoint), "smoke"], capture_output=True,
+                                            text=True, env=env)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("QWEN_LAUNCHER_OK", result.stdout)
+
     def test_incomplete_cache_entry_uses_effective_metadata(self):
         checker = Path(__file__).resolve().parents[1] / "compat/python/bin/violin-qwen-metadata"
         with tempfile.TemporaryDirectory() as directory:
