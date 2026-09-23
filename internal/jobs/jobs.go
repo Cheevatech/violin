@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -23,6 +24,7 @@ import (
 
 type Options struct {
 	Root, Workspace, Backend, RequestedBackend, Mode, Task string
+	OwnerInstance, SessionID                               string
 	Timeout, IdleTimeout                                   int
 	TimeoutSource                                          string
 }
@@ -48,6 +50,8 @@ type Descriptor struct {
 	LayaError        string         `json:"laya_error,omitempty"`
 	LayaDecision     *laya.Decision `json:"laya_decision,omitempty"`
 	OwnerPID         int            `json:"owner_pid"`
+	OwnerInstance    string         `json:"owner_instance,omitempty"`
+	SessionID        string         `json:"session_id,omitempty"`
 	SupervisorMode   string         `json:"supervisor_mode"`
 	SupervisorState  string         `json:"supervisor_state"`
 	SupervisorStale  int            `json:"supervisor_stale_seconds"`
@@ -98,6 +102,31 @@ func Spawn(o Options) (*Job, error) {
 		layaMode = "shadow"
 	}
 	decision := EvaluateLaya(o.Root, o.Task, o.Mode, o.Backend, cfg)
+	if err := os.MkdirAll(o.Root, 0700); err != nil {
+		return nil, err
+	}
+	lock, err := os.OpenFile(filepath.Join(o.Root, "scheduler.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return nil, err
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	roundRobinPath := filepath.Join(o.Root, "round-robin.json")
+	oldRoundRobin, roundRobinErr := os.ReadFile(roundRobinPath)
+	spawned := false
+	defer func() {
+		if spawned {
+			return
+		}
+		if roundRobinErr == nil {
+			_ = os.WriteFile(roundRobinPath, oldRoundRobin, 0600)
+		} else if os.IsNotExist(roundRobinErr) {
+			_ = os.Remove(roundRobinPath)
+		}
+	}()
 	if o.Backend == "auto" {
 		order := cfg.Scheduler.Order
 		if len(order) == 0 {
@@ -122,7 +151,7 @@ func Spawn(o Options) (*Job, error) {
 		if layaMode == "active" && !decision.Fallback && decision.Decision != nil && decision.Decision.Confidence >= 0.80 && decision.Decision.Margin >= 0.15 {
 			preferred = decision.Decision.BackendCandidates
 		}
-		o.Backend, err = selectBackend(o.Root, readyOrder, cfg.Backend, preferred)
+		o.Backend, err = selectBackend(o.Root, readyOrder, cfg.Backend, preferred, cfg.Scheduler, sessionID(o), true)
 		if err != nil {
 			return nil, err
 		}
@@ -132,6 +161,11 @@ func Spawn(o Options) (*Job, error) {
 	}
 	if authError := checkAuth(o.Backend, cfg.Backend[o.Backend]); authError != nil {
 		return nil, authError
+	}
+	if o.RequestedBackend != "auto" {
+		if _, err := selectBackend(o.Root, []string{o.Backend}, cfg.Backend, nil, cfg.Scheduler, sessionID(o), false); err != nil {
+			return nil, err
+		}
 	}
 	if o.Timeout <= 0 {
 		o.Timeout = cfg.Timeouts.Defaults[o.Mode]
@@ -185,14 +219,17 @@ func Spawn(o Options) (*Job, error) {
 	}
 	_ = stdout.Close()
 	_ = stderr.Close()
-	d := Descriptor{AgentID: fmt.Sprintf("%d-%d", time.Now().UnixNano(), cmd.Process.Pid), Backend: o.Backend, RequestedBackend: o.RequestedBackend, PID: cmd.Process.Pid, Evidence: run, Output: outputPath, Status: statusPath, TaskFile: taskPath, Mode: o.Mode, Timeout: o.Timeout, TimeoutSource: o.TimeoutSource, IdleTimeout: o.IdleTimeout, IdleEnabled: config.IdleTimeoutEnabled(o.Backend, cfg.Backend[o.Backend]), OwnerPID: os.Getpid(), CreatedAt: time.Now(), LayaMode: layaMode, LayaFallback: decision.Fallback, LayaModelVersion: decision.ModelVersion, LayaError: decision.Error, LayaDecision: decision.Decision, SupervisorMode: cfg.Laya.Supervisor.Mode, SupervisorState: "starting", SupervisorStale: cfg.Laya.Supervisor.StaleSeconds}
+	d := Descriptor{AgentID: fmt.Sprintf("%d-%d", time.Now().UnixNano(), cmd.Process.Pid), Backend: o.Backend, RequestedBackend: o.RequestedBackend, PID: cmd.Process.Pid, Lease: fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid()), Evidence: run, Output: outputPath, Status: statusPath, TaskFile: taskPath, Mode: o.Mode, Timeout: o.Timeout, TimeoutSource: o.TimeoutSource, IdleTimeout: o.IdleTimeout, IdleEnabled: config.IdleTimeoutEnabled(o.Backend, cfg.Backend[o.Backend]), OwnerPID: os.Getpid(), OwnerInstance: o.OwnerInstance, SessionID: sessionID(o), CreatedAt: time.Now(), LayaMode: layaMode, LayaFallback: decision.Fallback, LayaModelVersion: decision.ModelVersion, LayaError: decision.Error, LayaDecision: decision.Decision, SupervisorMode: cfg.Laya.Supervisor.Mode, SupervisorState: "starting", SupervisorStale: cfg.Laya.Supervisor.StaleSeconds}
 	j := &Job{Descriptor: d, path: filepath.Join(o.Root, "jobs", d.AgentID+".json"), cmd: cmd}
 	if err = os.MkdirAll(filepath.Dir(j.path), 0700); err != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		return nil, err
 	}
 	if err = j.save(); err != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		return nil, err
 	}
+	spawned = true
 	return j, nil
 }
 
@@ -212,6 +249,9 @@ func checkAuth(provider string, backend config.Backend) error {
 }
 
 func Open(root, id string) (*Job, error) {
+	if !validID.MatchString(id) {
+		return nil, errors.New("invalid agent id")
+	}
 	path := filepath.Join(root, "jobs", id+".json")
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -221,7 +261,46 @@ func Open(root, id string) (*Job, error) {
 	if err = json.Unmarshal(data, &d); err != nil {
 		return nil, err
 	}
+	if d.AgentID != id || d.PID <= 0 || !strings.HasSuffix(id, "-"+strconv.Itoa(d.PID)) {
+		return nil, errors.New("invalid job descriptor")
+	}
+	run, err := filepath.Abs(d.Evidence)
+	if err != nil {
+		return nil, err
+	}
+	base, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	canonicalBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		return nil, err
+	}
+	canonicalRun, err := filepath.EvalSymlinks(run)
+	if err != nil {
+		return nil, err
+	}
+	if filepath.Dir(canonicalRun) != canonicalBase || !strings.HasPrefix(filepath.Base(run), d.Backend+"-") || d.Output != filepath.Join(run, "output.json") || d.Status != filepath.Join(run, "status.json") || d.TaskFile != filepath.Join(run, "task.txt") {
+		return nil, errors.New("invalid job paths")
+	}
+	for _, p := range []string{d.Output, d.Status, d.TaskFile} {
+		if resolved, e := filepath.EvalSymlinks(p); e == nil && resolved != filepath.Join(canonicalRun, filepath.Base(p)) {
+			return nil, errors.New("job path uses a symlink")
+		}
+	}
 	return &Job{Descriptor: d, path: path}, nil
+}
+
+var validID = regexp.MustCompile(`^[0-9]+-[1-9][0-9]*$`)
+
+func sessionID(o Options) string {
+	if o.SessionID != "" {
+		return o.SessionID
+	}
+	if v := os.Getenv("VIOLIN_SESSION_ID"); v != "" {
+		return v
+	}
+	return fmt.Sprintf("cli-%d", os.Getpid())
 }
 func (j *Job) save() error {
 	data, err := json.MarshalIndent(j.Descriptor, "", "  ")
@@ -241,14 +320,24 @@ func (j *Job) alive() bool {
 			return false
 		}
 	}
-	if j.cmd != nil && j.cmd.ProcessState == nil {
-		return true
+	return j.workerMatches()
+}
+func (j *Job) workerMatches() bool {
+	pid := j.Descriptor.PID
+	if pid <= 0 {
+		return false
 	}
-	p, err := os.FindProcess(j.Descriptor.PID)
+	group, err := syscall.Getpgid(pid)
+	if err != nil || group != pid {
+		return false
+	}
+	output, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
 	if err != nil {
 		return false
 	}
-	return p.Signal(syscall.Signal(0)) == nil
+	command := string(output)
+	taskArg := regexp.MustCompile(`(?:^|\s)--task-file\s+` + regexp.QuoteMeta(j.Descriptor.TaskFile) + `(?:\s|$)`)
+	return taskArg.MatchString(strings.TrimSpace(command)) && (strings.Contains(command, " worker ") || strings.Contains(command, "violin-worker"))
 }
 func (j *Job) Live() map[string]any {
 	observation := j.observe()
@@ -275,21 +364,10 @@ func supervisorStale(d Descriptor) time.Duration {
 }
 
 func (j *Job) Wait(seconds int) (any, error) {
-	if j.cmd != nil {
-		if seconds <= 0 {
-			_ = j.cmd.Wait()
-			j.cmd = nil
-		} else {
-			done := make(chan error, 1)
-			go func() { done <- j.cmd.Wait() }()
-			select {
-			case <-done:
-				j.cmd = nil
-			case <-time.After(time.Duration(seconds) * time.Second):
-				return j.Live(), nil
-			}
-		}
-	} else if seconds > 0 {
+	if seconds < 0 {
+		return nil, errors.New("wait_seconds must be nonnegative")
+	}
+	if seconds > 0 {
 		deadline := time.Now().Add(time.Duration(seconds) * time.Second)
 		for j.alive() && time.Now().Before(deadline) {
 			time.Sleep(100 * time.Millisecond)
@@ -386,19 +464,22 @@ func reportErrorClass(value map[string]any) string {
 	return reportOutcome(value)
 }
 func (j *Job) Interrupt() (map[string]any, error) {
-	_ = syscall.Kill(-j.Descriptor.PID, syscall.SIGINT)
-	if j.cmd != nil {
-		done := make(chan struct{})
-		go func() { _, _ = j.cmd.Process.Wait(); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(8 * time.Second):
-		}
-	} else {
-		deadline := time.Now().Add(8 * time.Second)
-		for j.alive() && time.Now().Before(deadline) {
-			time.Sleep(50 * time.Millisecond)
-		}
+	if !j.workerMatches() {
+		return nil, errors.New("job is stale: worker identity cannot be verified")
+	}
+	if err := syscall.Kill(-j.Descriptor.PID, syscall.SIGINT); err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(8 * time.Second)
+	for j.workerMatches() && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if j.workerMatches() {
+		_ = syscall.Kill(-j.Descriptor.PID, syscall.SIGKILL)
+		time.Sleep(100 * time.Millisecond)
+	}
+	if j.workerMatches() {
+		return nil, errors.New("worker remains active after interrupt")
 	}
 	outputData, outputErr := os.ReadFile(j.Descriptor.Output)
 	var outputValue map[string]any
@@ -452,7 +533,7 @@ func List(root string) ([]map[string]any, error) {
 
 // InterruptOwned stops only jobs spawned by this server process. Descriptors
 // from an earlier server remain recoverable after restart.
-func InterruptOwned(root string, ownerPID int) {
+func InterruptOwned(root string, ownerInstance string) {
 	entries, err := os.ReadDir(filepath.Join(root, "jobs"))
 	if err != nil {
 		return
@@ -462,17 +543,18 @@ func InterruptOwned(root string, ownerPID int) {
 			continue
 		}
 		job, err := Open(root, strings.TrimSuffix(entry.Name(), ".json"))
-		if err == nil && job.Descriptor.OwnerPID == ownerPID && job.alive() {
+		if err == nil && ownerInstance != "" && job.Descriptor.OwnerInstance == ownerInstance && job.alive() {
 			_, _ = job.Interrupt()
 		}
 	}
 }
 
-func selectBackend(root string, order []string, backendConfig map[string]config.Backend, preferred []string) (string, error) {
+func selectBackend(root string, order []string, backendConfig map[string]config.Backend, preferred []string, scheduler config.Scheduler, session string, advance bool) (string, error) {
 	if len(order) == 0 {
 		order = []string{"agy", "qwen", "claude"}
 	}
 	counts := map[string]int{}
+	machine, sessionCount := 0, 0
 	entries, err := os.ReadDir(filepath.Join(root, "jobs"))
 	if err != nil && !os.IsNotExist(err) {
 		return "", err
@@ -484,11 +566,27 @@ func selectBackend(root string, order []string, backendConfig map[string]config.
 		job, err := Open(root, strings.TrimSuffix(entry.Name(), ".json"))
 		if err == nil && job.alive() {
 			counts[job.Descriptor.Backend]++
+			machine++
+			if job.Descriptor.SessionID == session {
+				sessionCount++
+			}
 		}
+	}
+	if machine >= scheduler.MachineMaxConcurrency || sessionCount >= scheduler.SessionMaxConcurrency {
+		return "", errors.New("worker capacity is full")
 	}
 	for _, candidate := range preferred {
 		if !contains(order, candidate) || counts[candidate] >= capacity(candidate, backendConfig) {
 			continue
+		}
+		if advance {
+			for i, name := range order {
+				if name == candidate {
+					data, _ := json.Marshal(map[string]int{"index": (i + 1) % len(order)})
+					_ = os.WriteFile(filepath.Join(root, "round-robin.json"), data, 0600)
+					break
+				}
+			}
 		}
 		return candidate, nil
 	}
@@ -507,8 +605,10 @@ func selectBackend(root string, order []string, backendConfig map[string]config.
 		limit := capacity(candidate, backendConfig)
 		if counts[candidate] < limit {
 			next := (index + offset + 1) % len(order)
-			data, _ := json.Marshal(map[string]int{"index": next})
-			_ = os.WriteFile(statePath, data, 0600)
+			if advance {
+				data, _ := json.Marshal(map[string]int{"index": next})
+				_ = os.WriteFile(statePath, data, 0600)
+			}
 			return candidate, nil
 		}
 	}

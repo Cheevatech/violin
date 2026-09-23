@@ -33,6 +33,12 @@ function cacheMetadataPath() {
   return `${cachePath()}.json`;
 }
 
+function installedPath() {
+  return path.join(os.homedir(), '.local', 'share', 'violin', 'bin', 'violin');
+}
+
+function installedMetadataPath() { return `${installedPath()}.json`; }
+
 function releaseBase() {
   return process.env.VIOLIN_RELEASE_BASE_URL || `https://github.com/${OWNER}/${REPOSITORY}/releases/download/v${VERSION}`;
 }
@@ -92,7 +98,65 @@ async function ensureBinary() {
 }
 
 function doctor() {
-  return { platform: platformKey(), version: VERSION, cache: cachePath(), node: process.version };
+  const cached = metadataStatus(cachePath(), cacheMetadataPath());
+  const installed = metadataStatus(installedPath(), installedMetadataPath());
+  return { platform: platformKey(), version: VERSION, cache: cachePath(), installed: installedPath(),
+    cache_status: cached, installed_status: installed,
+    update_available: cached.valid && (!installed.valid || cached.sha256 !== installed.sha256 || cached.version !== installed.version),
+    node: process.version };
+}
+
+function metadataStatus(binary, metadata) {
+  try {
+    const recorded = JSON.parse(fs.readFileSync(metadata, 'utf8'));
+    const actual = crypto.createHash('sha256').update(fs.readFileSync(binary)).digest('hex');
+    return { valid: recorded.sha256 === actual, version: recorded.version, sha256: actual };
+  } catch (_) { return { valid: false }; }
+}
+
+function runBinary(binary, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(binary, args, { stdio: 'inherit', env: process.env });
+    child.once('error', reject);
+    child.once('exit', code => resolve(code ?? 1));
+  });
+}
+
+async function installManaged(binary) {
+  const target = installedPath();
+  const metadata = installedMetadataPath();
+  const suffix = `${Date.now()}-${process.pid}`;
+  const backup = `${target}.backup-${suffix}`;
+  const metaBackup = `${metadata}.backup-${suffix}`;
+  const temporary = `${target}.tmp-${suffix}`;
+  const hadBinary = fs.existsSync(target);
+  const hadMetadata = fs.existsSync(metadata);
+  const configPath = path.join(os.homedir(), '.codex', 'config.toml');
+  const oldConfig = fs.existsSync(configPath) ? fs.readFileSync(configPath) : null;
+  fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+  const cacheMeta = JSON.parse(fs.readFileSync(cacheMetadataPath(), 'utf8'));
+  try {
+    fs.copyFileSync(binary, temporary);
+    fs.chmodSync(temporary, 0o700);
+    if (hadBinary) fs.copyFileSync(target, backup);
+    if (hadMetadata) fs.copyFileSync(metadata, metaBackup);
+    fs.renameSync(temporary, target);
+    fs.writeFileSync(metadata, JSON.stringify(cacheMeta) + '\n', { mode: 0o600 });
+    const code = await runBinary(target, ['install']);
+    if (code !== 0) throw new Error(`install failed with exit code ${code}`);
+    return { binary: target, backup: hadBinary ? backup : null };
+  } catch (error) {
+    if (oldConfig !== null) {
+      const restore = `${configPath}.tmp-${suffix}`;
+      fs.writeFileSync(restore, oldConfig, { mode: 0o600 });
+      fs.renameSync(restore, configPath);
+    } else fs.rmSync(configPath, { force: true });
+    if (hadBinary && fs.existsSync(backup)) fs.renameSync(backup, target);
+    else if (!hadBinary) fs.rmSync(target, { force: true });
+    if (hadMetadata && fs.existsSync(metaBackup)) fs.renameSync(metaBackup, metadata);
+    else if (!hadMetadata) fs.rmSync(metadata, { force: true });
+    throw error;
+  } finally { fs.rmSync(temporary, { force: true }); }
 }
 
 async function main(args) {
@@ -101,8 +165,8 @@ async function main(args) {
     return;
   }
   const binary = await ensureBinary();
-  const child = spawn(binary, args, { stdio: 'inherit', env: process.env });
-  child.on('exit', code => process.exit(code ?? 1));
+  if (args[0] === 'install') { await installManaged(binary); return; }
+  process.exitCode = await runBinary(binary, args);
 }
 
 if (require.main === module) main(process.argv.slice(2)).catch(error => {
@@ -110,4 +174,4 @@ if (require.main === module) main(process.argv.slice(2)).catch(error => {
   process.exit(1);
 });
 
-module.exports = { platformKey, cachePath, cacheMetadataPath, releaseBase, verifySignature, ensureBinary };
+module.exports = { platformKey, cachePath, cacheMetadataPath, installedPath, installedMetadataPath, releaseBase, verifySignature, ensureBinary, installManaged, doctor };

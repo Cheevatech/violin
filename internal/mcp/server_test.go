@@ -85,3 +85,31 @@ func TestRunServesLayaToolsThroughMCPProtocol(t *testing.T) {
 		t.Fatalf("MCP tools/list missing Laya route: %s", output.String())
 	}
 }
+
+func TestWaitArgumentContract(t *testing.T) {
+	for _, item := range []struct {
+		value any
+		want  int
+		bad   bool
+	}{
+		{nil, 50, false}, {float64(0), 0, false}, {float64(50), 50, false}, {float64(300), 50, false}, {float64(1.5), 0, true}, {"2", 0, true}, {float64(-1), 0, true},
+	} {
+		args := map[string]any{}
+		if item.value != nil {
+			args["wait_seconds"] = item.value
+		}
+		got, err := waitArg(args)
+		if (err != nil) != item.bad || (!item.bad && got != item.want) {
+			t.Fatalf("value=%v got=%d err=%v", item.value, got, err)
+		}
+	}
+	for _, tool := range tools()["tools"].([]map[string]any) {
+		if tool["name"] == "laya_wait_job" || tool["name"] == "wait_agent" {
+			schema := tool["inputSchema"].(map[string]any)
+			props := schema["properties"].(map[string]any)
+			if props["wait_seconds"].(map[string]any)["maximum"] != 50 {
+				t.Fatal("incorrect wait schema")
+			}
+		}
+	}
+}
