@@ -1,7 +1,9 @@
 package laya
 
 import (
+	"bufio"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"time"
@@ -24,6 +26,32 @@ type FeedbackEvent struct {
 	DurationSeconds  float64   `json:"duration_seconds,omitempty"`
 	TimeoutSeconds   int       `json:"timeout_seconds"`
 	ErrorClass       string    `json:"error_class,omitempty"`
+	Corrected        bool      `json:"corrected,omitempty"`
+	CorrectedBackend string    `json:"corrected_backend,omitempty"`
+	CorrectedMode    string    `json:"corrected_mode,omitempty"`
+	CorrectedRisk    Risk      `json:"corrected_risk,omitempty"`
+	CorrectedTimeout string    `json:"corrected_timeout_policy,omitempty"`
+	CorrectedRetry   string    `json:"corrected_retry_policy,omitempty"`
+}
+
+func FeedbackHasAgent(root, agentID string) (bool, error) {
+	file, err := os.Open(filepath.Join(root, "laya-feedback.jsonl"))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 4096), 1024*1024)
+	for scanner.Scan() {
+		var event FeedbackEvent
+		if json.Unmarshal(scanner.Bytes(), &event) == nil && event.AgentID == agentID {
+			return true, nil
+		}
+	}
+	return false, scanner.Err()
 }
 
 func AppendFeedback(root string, event FeedbackEvent) error {

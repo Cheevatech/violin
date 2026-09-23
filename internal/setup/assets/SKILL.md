@@ -20,6 +20,11 @@ acceptance. Do not silently retry or fall back to a paid provider.
 Before spawning, use `laya_route` for backend, mode, timeout, risk, and
 execution-target advice.
 
+When `spawn_agent` returns `status: "review_required"`, do not retry unchanged.
+Have the main model review the task; spawn again with `risk_reviewed: true` only
+after that review. Explicit backend, mode, and timeout settings take precedence.
+Use `mode: "auto"` only when Laya may choose inspect versus implement.
+
 ## Implement
 
 For implementation work, use `laya_review_risk` before changing files. Give the
@@ -49,8 +54,12 @@ Never commit provider credentials, local configuration, model caches, or
 private keys. Preview configuration changes, preserve backups, redact secrets,
 and run secret scanning before release.
 
-Laya MCP tools are read-only/advisory: they must not execute arbitrary shell,
-modify files, spawn workers during route/risk review, or return API keys,
-tokens, raw secret-bearing environment values, or private model paths. Model
-updates must use the verified manifest/checksum flow. Skill installation must
-remain previewable, backup-protected, and must not overwrite unmanaged files.
+Laya route, risk-review, and job-inspection tools are read-only/advisory: they
+must not execute arbitrary shell, modify files, spawn workers during route/risk
+review, or return API keys,
+tokens, raw secret-bearing environment values, or private model paths. The
+`laya_feedback` tool only appends reviewed labels and outcomes by known job ID;
+it must never receive task text. Model updates must use the verified
+manifest/checksum flow, and model activation must be explicit after replay
+gates pass. Skill installation must remain previewable, backup-protected, and
+must not overwrite unmanaged files.

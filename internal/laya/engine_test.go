@@ -132,6 +132,14 @@ func TestManagedEngineUsesBuiltinVerifiedClassifier(t *testing.T) {
 	if err != nil || result.Fallback || result.Decision == nil || result.Decision.BackendCandidates[0] != "qwen" || result.Decision.TaskMode != "implement" || result.Decision.CostTier == "" || result.Decision.LatencyTier == "" {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
+	for _, head := range []string{"backend", "task_mode", "risk"} {
+		if _, ok := result.Decision.HeadConfidence[head]; !ok {
+			t.Fatalf("missing confidence for head %s: %+v", head, result.Decision)
+		}
+		if _, ok := result.Decision.HeadMargin[head]; !ok {
+			t.Fatalf("missing margin for head %s: %+v", head, result.Decision)
+		}
+	}
 }
 
 func TestEnsureDefaultModelInstallsVerifiedEnglishModel(t *testing.T) {

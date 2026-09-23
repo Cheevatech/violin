@@ -69,20 +69,22 @@ type RetryHint struct {
 }
 
 type Decision struct {
-	BackendCandidates  []string        `json:"backend_candidates"`
-	TaskMode           string          `json:"task_mode"`
-	Risk               Risk            `json:"risk"`
-	TimeoutHintSeconds int             `json:"timeout_hint_seconds"`
-	IdleTimeoutEnabled bool            `json:"idle_timeout_enabled"`
-	Retry              RetryHint       `json:"retry_hint"`
-	ExecutionTarget    ExecutionTarget `json:"execution_target"`
-	CostTier           Tier            `json:"cost_tier"`
-	LatencyTier        Tier            `json:"latency_tier"`
-	Confidence         float64         `json:"confidence"`
-	Margin             float64         `json:"margin"`
-	ReasonCodes        []string        `json:"reason_codes"`
-	ModelVersion       string          `json:"model_version"`
-	Fallback           bool            `json:"fallback"`
+	BackendCandidates  []string           `json:"backend_candidates"`
+	TaskMode           string             `json:"task_mode"`
+	Risk               Risk               `json:"risk"`
+	TimeoutHintSeconds int                `json:"timeout_hint_seconds"`
+	IdleTimeoutEnabled bool               `json:"idle_timeout_enabled"`
+	Retry              RetryHint          `json:"retry_hint"`
+	ExecutionTarget    ExecutionTarget    `json:"execution_target"`
+	CostTier           Tier               `json:"cost_tier"`
+	LatencyTier        Tier               `json:"latency_tier"`
+	Confidence         float64            `json:"confidence"`
+	Margin             float64            `json:"margin"`
+	HeadConfidence     map[string]float64 `json:"head_confidence,omitempty"`
+	HeadMargin         map[string]float64 `json:"head_margin,omitempty"`
+	ReasonCodes        []string           `json:"reason_codes"`
+	ModelVersion       string             `json:"model_version"`
+	Fallback           bool               `json:"fallback"`
 }
 
 func (d Decision) Validate() error {
@@ -125,6 +127,16 @@ func (d Decision) Validate() error {
 	}
 	if math.IsNaN(d.Margin) || math.IsInf(d.Margin, 0) || d.Margin < 0 || d.Margin > 1 {
 		return errors.New("Laya margin must be between 0 and 1")
+	}
+	for name, value := range d.HeadConfidence {
+		if name == "" || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 1 {
+			return errors.New("Laya head confidence must be between 0 and 1")
+		}
+	}
+	for name, value := range d.HeadMargin {
+		if name == "" || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 1 {
+			return errors.New("Laya head margin must be between 0 and 1")
+		}
 	}
 	return nil
 }

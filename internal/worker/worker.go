@@ -3,6 +3,8 @@ package worker
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -22,12 +24,13 @@ import (
 )
 
 type Options struct {
-	Backend, Mode, Workspace, TaskFile string
-	Timeout, IdleTimeout               int
-	IdleTimeoutEnabled                 bool
-	HeartbeatSeconds                   int
-	StartedAt                          time.Time
-	baseline                           []string
+	Backend, Mode, Workspace, TaskFile          string
+	Timeout, IdleTimeout, MaxAttempts, Attempts int
+	IdleTimeoutEnabled                          bool
+	HeartbeatSeconds                            int
+	StartedAt                                   time.Time
+	baseline                                    []string
+	baselineDigest                              string
 }
 
 var statusWriteMu sync.Mutex
@@ -54,6 +57,7 @@ func Parse(args []string) (Options, error) {
 	taskFile := fs.String("task-file", "", "task file")
 	timeout := fs.Int("timeout", 900, "timeout seconds")
 	idleTimeout := fs.Int("idle-timeout", 300, "idle timeout seconds")
+	maxAttempts := fs.Int("max-attempts", 1, "maximum provider attempts")
 	if len(args) == 0 {
 		return Options{}, errors.New("worker requires backend")
 	}
@@ -67,12 +71,18 @@ func Parse(args []string) (Options, error) {
 	if err != nil {
 		return Options{}, err
 	}
-	return Options{Backend: args[0], Mode: *mode, Workspace: workspacePath, TaskFile: *taskFile, Timeout: *timeout, IdleTimeout: *idleTimeout}, nil
+	return Options{Backend: args[0], Mode: *mode, Workspace: workspacePath, TaskFile: *taskFile, Timeout: *timeout, IdleTimeout: *idleTimeout, MaxAttempts: *maxAttempts}, nil
 }
 
 func Run(ctx context.Context, options Options) error {
+	if options.MaxAttempts == 0 {
+		options.MaxAttempts = 1
+	}
 	if options.Timeout < 1 {
 		return errors.New("worker timeout must be positive")
+	}
+	if options.MaxAttempts < 1 || options.MaxAttempts > 2 {
+		return errors.New("worker max attempts must be 1 or 2")
 	}
 	task, err := os.ReadFile(options.TaskFile)
 	if err != nil {
@@ -84,6 +94,7 @@ func Run(ctx context.Context, options Options) error {
 	}
 	backend := settings.Backend[options.Backend]
 	options.baseline = gitFiles(options.Workspace)
+	options.baselineDigest = workspaceDigest(options.Workspace)
 	options.HeartbeatSeconds = settings.Laya.Supervisor.HeartbeatSeconds
 	if options.HeartbeatSeconds < 1 {
 		options.HeartbeatSeconds = 5
@@ -94,30 +105,48 @@ func Run(ctx context.Context, options Options) error {
 	defer stopHeartbeat()
 	writeStatus("starting", options, started)
 	writeStatus("running", options, started)
-	var text string
-	var usage any
 	cliCommand := backend.CLI.Command
 	if len(cliCommand) == 0 {
 		cliCommand = commandParts(backend.Command)
 	}
 	options.IdleTimeoutEnabled = config.IdleTimeoutEnabled(options.Backend, backend)
-	if backend.Transport == "api" || (backend.Transport == "auto" && len(cliCommand) == 0) {
-		provider, err := providers.FromConfigProvider(ctx, settings, credentials.Default(), options.Backend)
-		if err != nil {
+	var text string
+	var usage any
+	maxAttempts := options.MaxAttempts
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		options.Attempts = attempt
+		retryableProviderFailure := false
+		if backend.Transport == "api" || (backend.Transport == "auto" && len(cliCommand) == 0) {
+			provider, providerErr := providers.FromConfigProvider(ctx, settings, credentials.Default(), options.Backend)
+			if providerErr == nil {
+				var result providers.Result
+				result, providerErr = provider.Execute(ctx, providers.Request{Task: string(task), Workspace: options.Workspace, Mode: options.Mode, Timeout: time.Duration(options.Timeout) * time.Second})
+				if providerErr == nil {
+					text, usage = result.Text, result.Usage
+				} else {
+					retryableProviderFailure = !errors.Is(providerErr, context.DeadlineExceeded) && !errors.Is(providerErr, context.Canceled)
+				}
+			}
+			err = providerErr
+		} else {
+			text, err = runCLI(ctx, cliCommand, string(task), options)
+			var execution executionError
+			retryableProviderFailure = errors.As(err, &execution) && execution.status == "provider_error"
+		}
+		if err == nil {
+			options.Attempts = attempt
+			break
+		}
+		currentDigest := workspaceDigest(options.Workspace)
+		if !retryableProviderFailure || options.Mode != "inspect" || attempt == maxAttempts || ctx.Err() != nil || options.baselineDigest == "" || currentDigest == "" || currentDigest != options.baselineDigest {
 			stopHeartbeat()
 			return writeFailure(options, started, err)
 		}
-		result, err := provider.Execute(ctx, providers.Request{Task: string(task), Workspace: options.Workspace, Mode: options.Mode, Timeout: time.Duration(options.Timeout) * time.Second})
-		if err != nil {
+		select {
+		case <-ctx.Done():
 			stopHeartbeat()
-			return writeFailure(options, started, err)
-		}
-		text, usage = result.Text, result.Usage
-	} else {
-		text, err = runCLI(ctx, cliCommand, string(task), options)
-		if err != nil {
-			stopHeartbeat()
-			return writeFailure(options, started, err)
+			return writeFailure(options, started, ctx.Err())
+		case <-time.After(2 * time.Second):
 		}
 	}
 	if strings.TrimSpace(text) == "" {
@@ -127,6 +156,54 @@ func Run(ctx context.Context, options Options) error {
 	stopHeartbeat()
 	writeStatus("completed", options, started)
 	return writeReport(options, started, "completed", 0, text, usage, "")
+}
+
+func workspaceDigest(workspace string) string {
+	status, err := exec.Command("git", "-C", workspace, "status", "--porcelain", "-z").Output()
+	if err != nil {
+		return ""
+	}
+	diff, err := exec.Command("git", "-C", workspace, "diff", "HEAD", "--binary").Output()
+	if err != nil {
+		return ""
+	}
+	untracked, err := exec.Command("git", "-C", workspace, "ls-files", "--others", "--exclude-standard", "-z").Output()
+	if err != nil {
+		return ""
+	}
+	ignored, err := exec.Command("git", "-C", workspace, "ls-files", "--others", "--ignored", "--exclude-standard", "-z").Output()
+	if err != nil {
+		return ""
+	}
+	hash := sha256.New()
+	_, _ = hash.Write(status)
+	_, _ = hash.Write(diff)
+	for _, name := range bytes.Split(append(untracked, ignored...), []byte{0}) {
+		if len(name) == 0 {
+			continue
+		}
+		path := filepath.Join(workspace, string(name))
+		info, err := os.Lstat(path)
+		if err != nil || info.Size() > 8*1024*1024 || (!info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0) {
+			return ""
+		}
+		var data []byte
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, readErr := os.Readlink(path)
+			if readErr != nil {
+				return ""
+			}
+			data = []byte(target)
+		} else {
+			data, err = os.ReadFile(path)
+			if err != nil {
+				return ""
+			}
+		}
+		_, _ = hash.Write(name)
+		_, _ = hash.Write(data)
+	}
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
 func commandParts(value any) []string {
@@ -416,7 +493,10 @@ func writeReport(options Options, started time.Time, status string, exitCode int
 	if len(summary) > summaryLimit {
 		summary = summary[:summaryLimit]
 	}
-	report := map[string]any{"status": status, "backend": options.Backend, "exit_code": exitCode, "duration_seconds": time.Since(started).Seconds(), "evidence": run, "phase": status, "metadata_status": "not_applicable", "smoke_status": "not_applicable", "final_message_seen": strings.TrimSpace(text) != "", "changed_files": changed, "git_diff_check": diffCheck, "effective_timeout_seconds": options.Timeout, "timeout_source": timeoutSource(options), "idle_timeout_seconds": idleTimeout, "idle_timeout_enabled": idleEnabled, "summary": summary, "summary_truncated": len(text) > summaryLimit, "supervisor_review_required": true, "usage": usage}
+	if options.Attempts < 1 {
+		options.Attempts = 1
+	}
+	report := map[string]any{"status": status, "backend": options.Backend, "exit_code": exitCode, "attempts": options.Attempts, "max_attempts": options.MaxAttempts, "duration_seconds": time.Since(started).Seconds(), "evidence": run, "phase": status, "metadata_status": "not_applicable", "smoke_status": "not_applicable", "final_message_seen": strings.TrimSpace(text) != "", "changed_files": changed, "git_diff_check": diffCheck, "effective_timeout_seconds": options.Timeout, "timeout_source": timeoutSource(options), "idle_timeout_seconds": idleTimeout, "idle_timeout_enabled": idleEnabled, "summary": summary, "summary_truncated": len(text) > summaryLimit, "supervisor_review_required": true, "usage": usage}
 	if errorMessage != "" {
 		report["error_message"] = errorMessage
 	}
@@ -445,7 +525,7 @@ func gitFiles(workspace string) []string {
 		return []string{}
 	}
 	var result []string
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+	for _, line := range strings.Split(strings.TrimRight(string(output), "\r\n"), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}

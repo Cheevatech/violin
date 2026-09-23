@@ -71,6 +71,40 @@ func TestVerifyRejectsTamperedArtifact(t *testing.T) {
 	}
 }
 
+func TestActivateRejectsTamperedCandidateAndKeepsCurrentActive(t *testing.T) {
+	root := t.TempDir()
+	m, err := NewManager(filepath.Join(root, "models"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	install := func(version, contents string, activate bool) {
+		source := filepath.Join(root, "source-"+version)
+		if err := os.Mkdir(source, 0700); err != nil {
+			t.Fatal(err)
+		}
+		payload := []byte(contents)
+		if err := os.WriteFile(filepath.Join(source, "model.bin"), payload, 0600); err != nil {
+			t.Fatal(err)
+		}
+		hash := sha256.Sum256(payload)
+		manifest := Manifest{ID: DefaultModelID, Version: version, Language: DefaultLanguage, Artifacts: []Artifact{{Path: "model.bin", SHA256: hex.EncodeToString(hash[:]), Size: int64(len(payload))}}}
+		if err := m.Install(manifest, source, activate); err != nil {
+			t.Fatal(err)
+		}
+	}
+	install("v1", "current", true)
+	install("v2", "candidate", false)
+	if err := os.WriteFile(filepath.Join(root, "models", "versions", "v2", "model.bin"), []byte("tampered"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Activate("v2"); err == nil {
+		t.Fatal("activated checksum-invalid model")
+	}
+	if got := m.Status().Active; got != "v1" {
+		t.Fatalf("active model changed to %q", got)
+	}
+}
+
 func TestModelVersionPathsRejectTraversal(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
