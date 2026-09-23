@@ -11,13 +11,13 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"strconv"
 
 	"github.com/film/violin/internal/auth"
 	"github.com/film/violin/internal/config"
 	"github.com/film/violin/internal/credentials"
 	"github.com/film/violin/internal/health"
 	"github.com/film/violin/internal/jobs"
+	"github.com/film/violin/internal/laya"
 )
 
 type request struct {
@@ -87,15 +87,16 @@ func tools() map[string]any {
 		return map[string]any{"type": "object", "properties": properties, "required": required, "additionalProperties": false}
 	}
 	return map[string]any{"tools": []map[string]any{
-		{"name": "spawn_agent", "description": "Delegate a bounded task to an external coding agent.", "inputSchema": object(map[string]any{"backend": map[string]any{"type": "string", "enum": []string{"auto", "agy", "qwen", "claude"}}, "task": map[string]any{"type": "string"}, "cwd": map[string]any{"type": "string"}, "mode": map[string]any{"type": "string", "enum": []string{"inspect", "implement"}}, "timeout_seconds": map[string]any{"type": "integer", "minimum": 1}, "idle_timeout_seconds": map[string]any{"type": "integer", "minimum": 1, "maximum": 3600}}, []string{"task", "cwd"})},
+		{"name": "spawn_agent", "description": "Delegate a bounded task to an external coding agent.", "inputSchema": object(map[string]any{"backend": map[string]any{"type": "string", "enum": []string{"auto", "agy", "qwen", "claude"}}, "task": map[string]any{"type": "string"}, "cwd": map[string]any{"type": "string"}, "mode": map[string]any{"type": "string", "enum": []string{"auto", "inspect", "implement"}}, "risk_reviewed": map[string]any{"type": "boolean"}, "timeout_seconds": map[string]any{"type": "integer", "minimum": 1}, "idle_timeout_seconds": map[string]any{"type": "integer", "minimum": 1, "maximum": 3600}}, []string{"task", "cwd"})},
 		{"name": "wait_agent", "description": "Wait on an existing agent.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}, "wait_seconds": map[string]any{"type": "integer", "minimum": 0, "maximum": 50}}, []string{"agent_id"})},
 		{"name": "list_agents", "description": "List agent jobs.", "inputSchema": object(map[string]any{}, nil)},
 		{"name": "interrupt_agent", "description": "Interrupt an agent without reverting work.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}}, []string{"agent_id"})},
-		{"name": "laya_route", "description": "Use the installed Laya model to recommend routing, timeout, risk, retry, and execution policy.", "inputSchema": object(map[string]any{"task": map[string]any{"type": "string"}, "cwd": map[string]any{"type": "string"}, "mode": map[string]any{"type": "string", "enum": []string{"inspect", "implement"}}, "backend": map[string]any{"type": "string", "enum": []string{"auto", "agy", "qwen", "claude"}}}, []string{"task"})},
+		{"name": "laya_route", "description": "Use the installed Laya model to recommend routing, timeout, risk, retry, and execution policy.", "inputSchema": object(map[string]any{"task": map[string]any{"type": "string"}, "cwd": map[string]any{"type": "string"}, "mode": map[string]any{"type": "string", "enum": []string{"auto", "inspect", "implement"}}, "backend": map[string]any{"type": "string", "enum": []string{"auto", "agy", "qwen", "claude"}}}, []string{"task"})},
 		{"name": "laya_review_risk", "description": "Review task risk before allowing an implementation, without changing files or spawning a worker.", "inputSchema": object(map[string]any{"task": map[string]any{"type": "string"}, "mode": map[string]any{"type": "string", "enum": []string{"inspect", "implement"}}}, []string{"task"})},
 		{"name": "laya_check_job", "description": "Inspect a Violin worker lifecycle state and supervisor evidence.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}}, []string{"agent_id"})},
 		{"name": "laya_wait_job", "description": "Wait for a Violin worker once and return its terminal or current supervisor state.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}, "wait_seconds": map[string]any{"type": "integer", "minimum": 0, "maximum": 50}}, []string{"agent_id"})},
 		{"name": "laya_explain_decision", "description": "Return the Laya decision and model metadata recorded for a worker.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}}, []string{"agent_id"})},
+		{"name": "laya_feedback", "description": "Record reviewed policy labels and outcome for a job without task text.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}, "backend": map[string]any{"type": "string", "enum": []string{"agy", "qwen", "claude"}}, "mode": map[string]any{"type": "string", "enum": []string{"inspect", "implement"}}, "risk": map[string]any{"type": "string", "enum": []string{"low", "medium", "high"}}, "timeout_policy": map[string]any{"type": "string", "enum": []string{"short", "standard", "long"}}, "retry_policy": map[string]any{"type": "string", "enum": []string{"never", "inspect_once"}}, "outcome": map[string]any{"type": "string", "enum": []string{"completed", "failed", "interrupted"}}}, []string{"agent_id", "backend", "mode", "risk", "timeout_policy", "retry_policy", "outcome"})},
 		{"name": "auth_status", "description": "Inspect global provider authentication without exposing credentials.", "inputSchema": object(map[string]any{}, nil)},
 		{"name": "health_status", "description": "Run configured provider health checks without exposing credentials.", "inputSchema": object(
 			map[string]any{"provider": map[string]any{"type": "string", "enum": []string{"qwen", "agy", "claude", "all"}}},
@@ -136,10 +137,34 @@ func call(params map[string]any) (any, error) {
 		task, _ := args["task"].(string)
 		backend, _ := args["backend"].(string)
 		mode, _ := args["mode"].(string)
-		timeout, timeoutSource := intArg(args, "timeout_seconds")
-		idle, _ := intArg(args, "idle_timeout_seconds")
-		job, err := jobs.Spawn(jobs.Options{Root: root, Workspace: cwd, Backend: backend, RequestedBackend: backend, Mode: mode, Task: task, Timeout: timeout, TimeoutSource: timeoutSource, IdleTimeout: idle, OwnerInstance: ownerInstance})
+		timeout, timeoutSource, err := intArg(args, "timeout_seconds")
 		if err != nil {
+			return nil, err
+		}
+		if _, exists := args["timeout_seconds"]; exists && timeout < 1 {
+			return nil, errors.New("timeout_seconds must be positive")
+		}
+		idle, _, err := intArg(args, "idle_timeout_seconds")
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := args["idle_timeout_seconds"]; exists && (idle < 1 || idle > 3600) {
+			return nil, errors.New("idle_timeout_seconds must be between 1 and 3600")
+		}
+		riskReviewed := false
+		if raw, exists := args["risk_reviewed"]; exists {
+			var ok bool
+			riskReviewed, ok = raw.(bool)
+			if !ok {
+				return nil, errors.New("risk_reviewed must be a boolean")
+			}
+		}
+		job, err := jobs.Spawn(jobs.Options{Root: root, Workspace: cwd, Backend: backend, RequestedBackend: backend, Mode: mode, Task: task, Timeout: timeout, TimeoutSource: timeoutSource, IdleTimeout: idle, OwnerInstance: ownerInstance, RiskReviewed: riskReviewed})
+		if err != nil {
+			var review jobs.ReviewRequiredError
+			if errors.As(err, &review) {
+				return review.Result(), nil
+			}
 			if required, ok := err.(jobs.AuthRequiredError); ok {
 				return required.Details(), nil
 			}
@@ -210,6 +235,46 @@ func call(params map[string]any) (any, error) {
 			return nil, err
 		}
 		return map[string]any{"agent_id": job.Descriptor.AgentID, "laya_mode": job.Descriptor.LayaMode, "laya_fallback": job.Descriptor.LayaFallback, "laya_model_version": job.Descriptor.LayaModelVersion, "laya_error": job.Descriptor.LayaError, "laya_decision": job.Descriptor.LayaDecision}, nil
+	case "laya_feedback":
+		id := stringArg(args, "agent_id", "")
+		backend := stringArg(args, "backend", "")
+		mode := stringArg(args, "mode", "")
+		risk := stringArg(args, "risk", "")
+		timeoutPolicy := stringArg(args, "timeout_policy", "")
+		retryPolicy := stringArg(args, "retry_policy", "")
+		outcome := stringArg(args, "outcome", "")
+		if err := jobs.ValidateFeedbackID(id); err != nil {
+			return nil, err
+		}
+		knownJob, err := laya.FeedbackHasAgent(root, id)
+		if err != nil {
+			return nil, err
+		}
+		if !knownJob {
+			return nil, errors.New("feedback requires a completed known job")
+		}
+		if backend != "agy" && backend != "qwen" && backend != "claude" {
+			return nil, errors.New("invalid feedback backend")
+		}
+		if mode != "inspect" && mode != "implement" {
+			return nil, errors.New("invalid feedback mode")
+		}
+		if risk != "low" && risk != "medium" && risk != "high" {
+			return nil, errors.New("invalid feedback risk")
+		}
+		if timeoutPolicy != "short" && timeoutPolicy != "standard" && timeoutPolicy != "long" {
+			return nil, errors.New("invalid feedback timeout_policy")
+		}
+		if retryPolicy != "never" && retryPolicy != "inspect_once" {
+			return nil, errors.New("invalid feedback retry_policy")
+		}
+		if outcome != "completed" && outcome != "failed" && outcome != "interrupted" {
+			return nil, errors.New("invalid feedback outcome")
+		}
+		if err := laya.AppendFeedback(root, laya.FeedbackEvent{AgentID: id, CorrectedBackend: backend, CorrectedMode: mode, CorrectedRisk: laya.Risk(risk), CorrectedTimeout: timeoutPolicy, CorrectedRetry: retryPolicy, Corrected: true, Outcome: outcome}); err != nil {
+			return nil, err
+		}
+		return map[string]any{"status": "recorded", "agent_id": id}, nil
 	default:
 		return nil, fmt.Errorf("unknown tool %q", name)
 	}
@@ -256,21 +321,22 @@ func workerRoot() string {
 	return filepath.Join(home, ".local", "state", "violin-workers")
 }
 
-func intArg(args map[string]any, key string) (int, string) {
+func intArg(args map[string]any, key string) (int, string, error) {
 	value, ok := args[key]
 	if !ok {
-		return 0, ""
+		return 0, "", nil
 	}
 	switch typed := value.(type) {
 	case float64:
-		return int(typed), "request"
-	case int:
-		return typed, "request"
-	case string:
-		parsed, err := strconv.Atoi(typed)
-		if err == nil {
-			return parsed, "request"
+		if math.IsNaN(typed) || math.IsInf(typed, 0) || typed != math.Trunc(typed) || typed < 0 || typed > float64(int(^uint(0)>>1)) {
+			return 0, "", fmt.Errorf("%s must be a nonnegative integer", key)
 		}
+		return int(typed), "request", nil
+	case int:
+		if typed < 0 {
+			return 0, "", fmt.Errorf("%s must be a nonnegative integer", key)
+		}
+		return typed, "request", nil
 	}
-	return 0, ""
+	return 0, "", fmt.Errorf("%s must be a nonnegative integer", key)
 }

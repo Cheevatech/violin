@@ -80,18 +80,47 @@ func (m Model) Evaluate(request Request) (Result, error) {
 	if backend == nil || mode == nil || risk == nil {
 		return Result{}, errors.New("Laya model is missing a required decision head")
 	}
+	timeoutPolicy := m.predict("timeout_policy", features)
+	retryPolicy := m.predict("retry_policy", features)
+	timeoutSeconds := timeoutHint(mode.label, risk.label)
+	if timeoutPolicy != nil {
+		switch timeoutPolicy.label {
+		case "short":
+			timeoutSeconds = 300
+		case "standard":
+			timeoutSeconds = 900
+		case "long":
+			timeoutSeconds = 3600
+		}
+	}
+	retry := RetryHint{MaxAttempts: 1}
+	if retryPolicy != nil && retryPolicy.label == "inspect_once" && mode.label == "inspect" {
+		retry.MaxAttempts = 2
+	}
+	headConfidence := map[string]float64{"backend": backend.confidence, "task_mode": mode.confidence, "risk": risk.confidence}
+	headMargin := map[string]float64{"backend": backend.margin, "task_mode": mode.margin, "risk": risk.margin}
+	if timeoutPolicy != nil {
+		headConfidence["timeout_policy"] = timeoutPolicy.confidence
+		headMargin["timeout_policy"] = timeoutPolicy.margin
+	}
+	if retryPolicy != nil {
+		headConfidence["retry_policy"] = retryPolicy.confidence
+		headMargin["retry_policy"] = retryPolicy.margin
+	}
 	decision := Decision{
 		BackendCandidates:  backend.labels,
 		TaskMode:           mode.label,
 		Risk:               Risk(risk.label),
-		TimeoutHintSeconds: timeoutHint(mode.label, risk.label),
+		TimeoutHintSeconds: timeoutSeconds,
 		IdleTimeoutEnabled: backend.label == "claude",
-		Retry:              RetryHint{MaxAttempts: 1},
+		Retry:              retry,
 		ExecutionTarget:    ExecutionExternal,
 		CostTier:           costTier(backend.label),
 		LatencyTier:        latencyTier(backend.label),
 		Confidence:         backend.confidence,
 		Margin:             backend.margin,
+		HeadConfidence:     headConfidence,
+		HeadMargin:         headMargin,
 		ReasonCodes:        reasonCodes(features, backend.label, mode.label, risk.label),
 		ModelVersion:       m.Version,
 	}
@@ -128,7 +157,13 @@ func (m Model) predict(name string, features map[string]float64) *prediction {
 		return nil
 	}
 	scores := append([]float64(nil), head.Bias...)
-	for feature, value := range features {
+	featureNames := make([]string, 0, len(features))
+	for feature := range features {
+		featureNames = append(featureNames, feature)
+	}
+	sort.Strings(featureNames)
+	for _, feature := range featureNames {
+		value := features[feature]
 		for index, weight := range head.Weights[feature] {
 			scores[index] += value * weight
 		}

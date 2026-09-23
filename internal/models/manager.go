@@ -153,22 +153,43 @@ func (m *Manager) Verify() error {
 	if err != nil {
 		return err
 	}
+	return m.VerifyVersion(version)
+}
+
+func (m *Manager) VerifyVersion(version string) error {
 	manifest, err := m.readManifest(version)
 	if err != nil {
 		return err
 	}
+	if manifest.Version != version || manifest.ID == "" || strings.ToLower(strings.TrimSpace(manifest.Language)) != DefaultLanguage || len(manifest.Artifacts) == 0 {
+		return errors.New("invalid model manifest")
+	}
 	for _, artifact := range manifest.Artifacts {
-		if err := verifyFile(filepath.Join(m.versions, version, artifact.Path), artifact.SHA256); err != nil {
+		rel, err := safeRelativePath(artifact.Path)
+		if err != nil {
 			return err
+		}
+		if err := verifyFile(filepath.Join(m.versions, version, rel), artifact.SHA256); err != nil {
+			return err
+		}
+		if artifact.Size > 0 {
+			info, err := os.Stat(filepath.Join(m.versions, version, rel))
+			if err != nil || info.Size() != artifact.Size {
+				return errors.New("model artifact size mismatch")
+			}
 		}
 	}
 	return nil
 }
 func (m *Manager) Rollback(version string) error {
-	if _, err := safeVersion(version); err != nil {
+	if err := m.VerifyVersion(version); err != nil {
 		return err
 	}
-	if _, err := m.readManifest(version); err != nil {
+	return m.activate(version)
+}
+
+func (m *Manager) Activate(version string) error {
+	if err := m.VerifyVersion(version); err != nil {
 		return err
 	}
 	return m.activate(version)

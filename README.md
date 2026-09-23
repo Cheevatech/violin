@@ -70,16 +70,32 @@ Set `[laya].runner` only for development adapters and choose `shadow`,
 `advisory`, or `active` in `[laya].mode`. The runtime receives the verified
 active model directory as `VIOLIN_LAYA_MODEL_DIR`; `VIOLIN_LAYA_RUNNER` and
 `VIOLIN_LAYA_MODE` are environment overrides. Shadow and advisory modes record
-decisions without changing backend selection; active mode can change only an
-auto-selected backend after verified model inference succeeds.
-Run `./bin/violin model recalibrate` to create a metadata-only calibration
-candidate; it never promotes a model automatically. Laya decisions are initially fallback-safe and can
-be rolled out from shadow to advisory to active mode without changing provider
-worker commands. A base Laya checkpoint must not be treated as production
-routing policy until violin has a domain-tuned, calibrated artifact and replay
-benchmarks; when no verified runtime is available, deterministic scheduler
-policy remains authoritative. The existing Python entrypoints remain available
-as a compatibility path during migration.
+decisions without changing execution policy. Active mode uses confidence and
+margin per policy head for backend, task mode, risk, timeout, and retry.
+High-risk, uncertain-risk, and fallback decisions return `review_required`
+without spawning unless the caller confirms a second request with
+`risk_reviewed: true`. Explicit caller mode and timeout values take precedence.
+Automatic retry is limited to provider failures during inspect jobs and stops
+when the workspace snapshot changes; timeout, cancellation, and side-effecting
+jobs are not retried.
+
+Train from a reviewed English JSONL dataset with separate `train` and `holdout`
+records containing `task`, `backend`, `task_mode`, `risk`, `timeout_policy`
+(`short`, `standard`, or `long`), `retry_policy` (`never` or `inspect_once`),
+`language: "en"`, `split`, and `reviewed: true`. Training rejects records
+without the explicit English language label. Keep holdout data independent and do not put raw
+production prompts in it. `./bin/violin model train --dataset reviewed.jsonl --version v3` installs
+a candidate only when each label has at least 100 holdout examples, automatic
+precision is at least 95%, high-risk recall is 100%, and per-head ECE is at most
+0.10. Training never activates a candidate. Review it, then explicitly run
+`./bin/violin model activate v3`; retain the previous version for rollback.
+`laya_feedback` stores corrected labels and outcome by job ID without task text;
+these events do not become training examples automatically. `model recalibrate`
+remains a metadata summary. Keep Laya in shadow until a candidate passes replay
+and operational tests. A base checkpoint is not production routing policy;
+when no verified model is available, deterministic scheduler policy remains
+authoritative. The existing Python entrypoints remain available as a
+compatibility path during migration.
 
 ## External workers under Codex supervision
 
@@ -208,11 +224,11 @@ falsely treating normal reasoning time as idle. Custom commands still use idle
 timeout.
 
 The Go MCP server also exposes Laya tools in the same server: `laya_route`,
-`laya_review_risk`, `laya_check_job`, `laya_wait_job`, and
-`laya_explain_decision`. These are read-only/advisory in the current release;
-`laya_wait_job` lets the caller wait once instead of repeatedly polling the
-worker. They reuse Violin's existing job descriptors, evidence, supervisor,
-and verified English model; there is no separate Laya MCP server.
+`laya_review_risk`, `laya_check_job`, `laya_wait_job`,
+`laya_explain_decision`, and `laya_feedback`. Route and risk review are
+read-only; feedback stores reviewed policy labels without task text. They reuse
+Violin's existing job descriptors, evidence, supervisor, and verified English
+model; there is no separate Laya MCP server.
 
 When a run stops, inspect `report.json`, `status.json`, `task.txt`,
 `output.json`, `stdout.log`, and `stderr.log` under the reported evidence path.

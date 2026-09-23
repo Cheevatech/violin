@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -373,7 +375,7 @@ func configCommand(args []string) error {
 
 func modelCommand(args []string) error {
 	if len(args) < 1 {
-		return errors.New("model requires status, verify, rollback, update, or recalibrate")
+		return errors.New("model requires status, verify, rollback, activate, train, update, or recalibrate")
 	}
 	m, err := models.NewManager(filepath.Join(root(), "models"))
 	if err != nil {
@@ -389,6 +391,53 @@ func modelCommand(args []string) error {
 			return errors.New("model rollback requires version")
 		}
 		return m.Rollback(args[1])
+	case "activate":
+		if len(args) != 2 {
+			return errors.New("model activate requires version")
+		}
+		if err := m.Activate(args[1]); err != nil {
+			return err
+		}
+		return printJSON(m.Status())
+	case "train":
+		fs := flag.NewFlagSet("model train", flag.ContinueOnError)
+		dataset := fs.String("dataset", "", "reviewed JSONL dataset with train/holdout splits")
+		version := fs.String("version", "", "candidate model version")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *dataset == "" || *version == "" {
+			return errors.New("model train requires --dataset and --version")
+		}
+		examples, err := laya.LoadDataset(*dataset)
+		if err != nil {
+			return err
+		}
+		candidate, report, err := laya.TrainDataset(examples, *version)
+		if err != nil {
+			return err
+		}
+		if !report.MeetsGate {
+			return printJSON(map[string]any{"status": "rejected", "report": report})
+		}
+		modelData, err := json.MarshalIndent(candidate, "", "  ")
+		if err != nil {
+			return err
+		}
+		source, err := os.MkdirTemp(root(), ".laya-candidate-")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(source)
+		if err := os.WriteFile(filepath.Join(source, "model.json"), modelData, 0600); err != nil {
+			return err
+		}
+		hash := sha256.Sum256(modelData)
+		manifest := models.Manifest{ID: models.DefaultModelID, Language: models.DefaultLanguage, Version: *version, Runtime: "builtin-go", Artifacts: []models.Artifact{{Path: "model.json", SHA256: hex.EncodeToString(hash[:]), Size: int64(len(modelData))}}}
+		if err := m.Install(manifest, source, false); err != nil {
+			return err
+		}
+		return printJSON(map[string]any{"status": "candidate_installed", "activated": false, "version": *version, "report": report})
 	case "update":
 		fs := flag.NewFlagSet("model update", flag.ContinueOnError)
 		manifestPath := fs.String("manifest", "", "manifest JSON")
