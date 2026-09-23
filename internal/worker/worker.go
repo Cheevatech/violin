@@ -252,13 +252,13 @@ func runCLI(parent context.Context, command []string, task string, options Optio
 			waitErr = err
 			waitCh = nil
 		case <-parent.Done():
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			stopCLI(cmd, waitCh)
 			return "", executionError{status: "interrupted", err: parent.Err()}
 		case <-hard.C:
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			stopCLI(cmd, waitCh)
 			return "", executionError{status: "timeout", err: fmt.Errorf("worker exceeded timeout of %d seconds", options.Timeout)}
 		case <-idleChannel(idle):
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			stopCLI(cmd, waitCh)
 			return "", executionError{status: "idle_timeout", err: fmt.Errorf("worker exceeded idle timeout of %d seconds", options.IdleTimeout)}
 		}
 	}
@@ -269,6 +269,21 @@ func runCLI(parent context.Context, command []string, task string, options Optio
 		return "", executionError{status: "provider_error", err: fmt.Errorf("%s: %w", argv[0], waitErr)}
 	}
 	return parseProviderOutput(bytes.TrimSpace(append(output, errorOutput...)), options.Backend)
+}
+
+func stopCLI(cmd *exec.Cmd, wait <-chan error) {
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGINT)
+	if wait != nil {
+		select {
+		case <-wait:
+		case <-time.After(3 * time.Second):
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			<-wait
+		}
+	}
+	if syscall.Kill(-cmd.Process.Pid, 0) == nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 }
 
 func parseCLIOutput(data []byte) string {
@@ -372,6 +387,9 @@ func eventText(event map[string]any) string {
 
 func writeFailure(options Options, started time.Time, err error) error {
 	status := "provider_error"
+	if errors.Is(err, context.Canceled) {
+		status = "interrupted"
+	}
 	var execution executionError
 	if errors.As(err, &execution) {
 		status = execution.status

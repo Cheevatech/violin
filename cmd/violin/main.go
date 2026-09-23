@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/film/violin/internal/auth"
 	"github.com/film/violin/internal/config"
@@ -78,7 +80,9 @@ func workerCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	return worker.Run(context.Background(), options)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return worker.Run(ctx, options)
 }
 
 func usage() {
