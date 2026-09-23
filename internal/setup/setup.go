@@ -158,7 +158,7 @@ inspect = 900
 implement = 3600
 
 [laya]
-mode = "shadow"
+mode = "active"
 timeout_seconds = 10
 # The Go binary includes the Laya inference engine. The install command installs
 # the verified English model; runner is only for development adapters.

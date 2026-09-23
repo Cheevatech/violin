@@ -59,6 +59,9 @@ func TestConfigPlanCreatesCredentialFreeTemplate(t *testing.T) {
 	if string(data) == "" || containsCredentialMarker(string(data)) {
 		t.Fatalf("unsafe config template: %s", data)
 	}
+	if !strings.Contains(string(data), "[laya]\nmode = \"active\"") {
+		t.Fatalf("new installs must enable guarded Laya mode: %s", data)
+	}
 	if _, err := ConfigPlan(true); err == nil {
 		t.Fatal("expected existing config refusal")
 	}

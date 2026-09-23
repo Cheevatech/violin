@@ -91,11 +91,13 @@ precision is at least 95%, high-risk recall is 100%, and per-head ECE is at most
 `./bin/violin model activate v3`; retain the previous version for rollback.
 `laya_feedback` stores corrected labels and outcome by job ID without task text;
 these events do not become training examples automatically. `model recalibrate`
-remains a metadata summary. Keep Laya in shadow until a candidate passes replay
-and operational tests. A base checkpoint is not production routing policy;
-when no verified model is available, deterministic scheduler policy remains
-authoritative. The existing Python entrypoints remain available as a
-compatibility path during migration.
+remains a metadata summary. The built-in model can run in guarded active mode:
+high-risk, uncertain-risk, and fallback decisions require the main model's
+explicit `risk_reviewed: true` approval before a worker can start. Its current
+base checkpoint is useful for routing suggestions but does not meet the trained
+production policy gates above. Keep unattended automation behind a candidate
+that passes replay and operational tests. The existing Python entrypoints remain
+available as a compatibility path during migration.
 
 ## External workers under Codex supervision
 
