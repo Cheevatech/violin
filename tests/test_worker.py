@@ -286,17 +286,34 @@ print(json.dumps({'type':'turn.completed'}))
             fake_codex = root / "codex"
             fake_codex.write_text("#!/bin/sh\nprintf '%s\\n' QWEN_LAUNCHER_OK\n")
             fake_codex.chmod(0o700)
-            installed_launcher = root / "violin-codex-qwen"
-            installed_launcher.symlink_to(launcher)
-            (root / "violin-qwen-metadata").symlink_to(repo / "bin/violin-qwen-metadata")
+            checker_marker = root / "metadata-checker-ran"
+            fake_checker = root / "fake-metadata-checker"
+            fake_checker.write_text("#!/bin/sh\ntouch '%s'\nprintf '{}\\n'\n" % checker_marker)
+            fake_checker.chmod(0o700)
+            source_bin = root / "source-bin"
+            source_bin.mkdir()
+            source_launcher = source_bin / "violin-codex-qwen"
+            source_launcher.write_bytes(launcher.read_bytes())
+            source_launcher.chmod(launcher.stat().st_mode & 0o777)
+            (source_bin / "violin-qwen-metadata").symlink_to(fake_checker)
+            installed_bin = root / "installed-bin"
+            installed_bin.mkdir()
+            installed_launcher = installed_bin / "violin-codex-qwen"
+            installed_launcher.symlink_to(source_launcher)
+            (installed_bin / "violin-qwen-metadata").symlink_to(fake_checker)
             env = dict(os.environ, VIOLIN_CODEX_BIN=str(fake_codex),
                        VIOLIN_CODEX_MODELS_CACHE=str(cache), LLMUX_API_KEY="offline-test")
-            for entrypoint in (launcher, installed_launcher):
-                with self.subTest(entrypoint=str(entrypoint)):
-                    result = subprocess.run([str(entrypoint), "smoke"], capture_output=True,
-                                            text=True, env=env)
-                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                    self.assertIn("QWEN_LAUNCHER_OK", result.stdout)
+            direct = subprocess.run([str(launcher), "smoke"], capture_output=True,
+                                    text=True, env=env)
+            self.assertEqual(direct.returncode, 0, direct.stdout + direct.stderr)
+            self.assertIn("QWEN_LAUNCHER_OK", direct.stdout)
+            self.assertFalse(checker_marker.exists())
+
+            installed = subprocess.run([str(installed_launcher), "smoke"], capture_output=True,
+                                       text=True, env=env)
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            self.assertIn("QWEN_LAUNCHER_OK", installed.stdout)
+            self.assertTrue(checker_marker.exists(), "installed launcher did not run its adjacent metadata checker")
 
     def test_incomplete_cache_entry_uses_effective_metadata(self):
         checker = Path(__file__).resolve().parents[1] / "compat/python/bin/violin-qwen-metadata"
