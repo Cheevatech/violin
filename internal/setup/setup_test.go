@@ -159,6 +159,12 @@ func TestSkillsPlanMigratesManagedInstallWithBackup(t *testing.T) {
 	if _, err := os.Stat(plan.Backup); err != nil {
 		t.Fatalf("backup missing: %v", err)
 	}
+	if !strings.HasPrefix(plan.Backup, filepath.Join(home, ".codex", "skill-backups")+string(os.PathSeparator)) {
+		t.Fatalf("backup must be stored under skill-backups: %s", plan.Backup)
+	}
+	if backupData, err := os.ReadFile(filepath.Join(plan.Backup, "violin-review", "SKILL.md")); err != nil || string(backupData) != "legacy" {
+		t.Fatalf("legacy backup content missing: data=%q err=%v", backupData, err)
+	}
 	if _, err := os.Stat(filepath.Join(target, "violin-review")); !os.IsNotExist(err) {
 		t.Fatalf("legacy skill remains: %v", err)
 	}

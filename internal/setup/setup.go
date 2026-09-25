@@ -220,7 +220,7 @@ func SkillsPlan(sourceDir string, apply bool) (Plan, error) {
 		return Plan{}, err
 	}
 	if _, err := os.Stat(target); err == nil {
-		backup := target + ".backup-" + time.Now().UTC().Format("20060102T150405.000000000Z")
+		backup := filepath.Join(home, ".codex", "skill-backups", "violin-"+time.Now().UTC().Format("20060102T150405.000000000Z"))
 		if err := copyTree(target, backup); err != nil {
 			return Plan{}, err
 		}
