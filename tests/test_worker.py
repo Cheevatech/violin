@@ -1,9 +1,12 @@
 import json
 import os
 from pathlib import Path
+import runpy
 import subprocess
 import tempfile
+import time
 import unittest
+from unittest import mock
 
 RUNNER = Path(__file__).resolve().parents[1] / "compat/python/bin/violin-worker"
 
@@ -184,6 +187,29 @@ print(json.dumps({'type':'turn.completed'}))
         self.assertEqual(code, 1)
         self.assertEqual(report["failure_reason"], "provider_error")
         self.assertIn("route unavailable", report["error_message"])
+
+    def test_structured_qwen_metadata_warning_is_degraded(self):
+        code, report = self.run_worker("qwen", """import json
+print(json.dumps({'type':'item.completed','item':{'type':'error','message':'Model metadata for qwen3.8-27b not found. Defaulting to fallback metadata.'}}))
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'smoke ok'}}))
+print(json.dumps({'type':'turn.completed'}))
+""")
+        self.assertEqual(code, 0)
+        self.assertEqual(report["status"], "completed")
+        self.assertTrue(report["final_message_seen"])
+        self.assertEqual(report["status_detail"], "metadata_degraded")
+        self.assertNotIn("failure_reason", report)
+
+    def test_qwen_health_timeout_uses_child_budgets_and_reports_detail(self):
+        worker = runpy.run_path(str(RUNNER))
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.dict(os.environ, {"VIOLIN_METADATA_TIMEOUT": "3", "VIOLIN_SMOKE_TIMEOUT": "12"}), \
+                mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("health", 20)) as run:
+            value, failure = worker["health"](Path(directory), time.monotonic() + 30)
+        self.assertEqual(run.call_args.kwargs["timeout"], 20)
+        self.assertEqual(failure, "metadata_unavailable")
+        self.assertEqual(value["status_detail"], "preflight_timeout")
+        self.assertEqual(value["preflight_timeout_seconds"], 20)
 
     def test_implement_without_diff_is_no_changes(self):
         code, report = self.run_worker("qwen", """import json
