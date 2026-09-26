@@ -195,6 +195,9 @@ func TestUpstreamEngineCoreMLRequiresExplicitOptIn(t *testing.T) {
 }
 
 func TestEnsureUpstreamDownloadsAndVerifiesBothCheckpoints(t *testing.T) {
+	if !nativeRuntimeAvailable() {
+		t.Skip("upstream bundle installation requires the CGO-enabled ONNX runtime")
+	}
 	platform, ok := supportedPlatform()
 	if !ok {
 		t.Skipf("unsupported local platform %s/%s", "test", "test")
@@ -274,6 +277,9 @@ func TestEnsureUpstreamRejectsChecksumMismatchAndKeepsFallbackStatus(t *testing.
 }
 
 func TestModelStatusDetectsPostInstallTampering(t *testing.T) {
+	if !nativeRuntimeAvailable() {
+		t.Skip("upstream runtime status requires the CGO-enabled ONNX runtime")
+	}
 	platform, ok := supportedPlatform()
 	if !ok {
 		t.Skip("unsupported platform")
