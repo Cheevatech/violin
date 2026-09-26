@@ -8,8 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -18,34 +20,45 @@ import (
 	"github.com/film/violin/internal/credentials"
 	"github.com/film/violin/internal/laya"
 	"github.com/film/violin/internal/models"
+	"github.com/film/violin/internal/supervisor"
 )
 
 type Options struct {
 	Root, Workspace, Backend, RequestedBackend, Mode, Task string
+	OwnerInstance, SessionID                               string
+	RiskReviewed                                           bool
 	Timeout, IdleTimeout                                   int
 	TimeoutSource                                          string
 }
 type Descriptor struct {
-	AgentID          string    `json:"agent_id"`
-	Backend          string    `json:"backend"`
-	RequestedBackend string    `json:"requested_backend"`
-	PID              int       `json:"pid"`
-	Lease            string    `json:"lease"`
-	Evidence         string    `json:"evidence"`
-	Output           string    `json:"output"`
-	Status           string    `json:"status"`
-	TaskFile         string    `json:"task_file"`
-	Mode             string    `json:"mode"`
-	Timeout          int       `json:"effective_timeout_seconds"`
-	TimeoutSource    string    `json:"timeout_source"`
-	IdleTimeout      int       `json:"idle_timeout_seconds"`
-	IdleEnabled      bool      `json:"idle_timeout_enabled"`
-	CreatedAt        time.Time `json:"created_at"`
-	LayaMode         string    `json:"laya_mode"`
-	LayaFallback     bool      `json:"laya_fallback"`
-	LayaModelVersion string    `json:"laya_model_version,omitempty"`
-	LayaError        string    `json:"laya_error,omitempty"`
-	OwnerPID         int       `json:"owner_pid"`
+	AgentID          string         `json:"agent_id"`
+	Backend          string         `json:"backend"`
+	RequestedBackend string         `json:"requested_backend"`
+	PID              int            `json:"pid"`
+	Lease            string         `json:"lease"`
+	Evidence         string         `json:"evidence"`
+	Output           string         `json:"output"`
+	Status           string         `json:"status"`
+	TaskFile         string         `json:"task_file"`
+	Mode             string         `json:"mode"`
+	Timeout          int            `json:"effective_timeout_seconds"`
+	TimeoutSource    string         `json:"timeout_source"`
+	IdleTimeout      int            `json:"idle_timeout_seconds"`
+	IdleEnabled      bool           `json:"idle_timeout_enabled"`
+	CreatedAt        time.Time      `json:"created_at"`
+	LayaMode         string         `json:"laya_mode"`
+	LayaFallback     bool           `json:"laya_fallback"`
+	LayaModelVersion string         `json:"laya_model_version,omitempty"`
+	LayaError        string         `json:"laya_error,omitempty"`
+	LayaDecision     *laya.Decision `json:"laya_decision,omitempty"`
+	RiskReviewed     bool           `json:"risk_reviewed,omitempty"`
+	OwnerPID         int            `json:"owner_pid"`
+	OwnerInstance    string         `json:"owner_instance,omitempty"`
+	SessionID        string         `json:"session_id,omitempty"`
+	SupervisorMode   string         `json:"supervisor_mode"`
+	SupervisorState  string         `json:"supervisor_state"`
+	SupervisorStale  int            `json:"supervisor_stale_seconds"`
+	MaxAttempts      int            `json:"max_attempts"`
 }
 type Job struct {
 	Descriptor Descriptor
@@ -58,6 +71,16 @@ type AuthRequiredError struct {
 	Transport string
 	Action    string
 	Message   string
+}
+
+type ReviewRequiredError struct {
+	Decision *laya.Decision
+	Reason   string
+}
+
+func (e ReviewRequiredError) Error() string { return "main model review required: " + e.Reason }
+func (e ReviewRequiredError) Result() map[string]any {
+	return map[string]any{"status": "review_required", "reason": e.Reason, "decision": e.Decision}
 }
 
 func (e AuthRequiredError) Error() string { return "auth_required: " + e.Message }
@@ -79,6 +102,9 @@ func Spawn(o Options) (*Job, error) {
 	if o.Mode == "" {
 		o.Mode = "inspect"
 	}
+	if o.Mode != "inspect" && o.Mode != "implement" && o.Mode != "auto" {
+		return nil, errors.New("mode must be inspect, implement, or auto")
+	}
 	if o.IdleTimeout <= 0 {
 		o.IdleTimeout = 300
 	}
@@ -92,12 +118,59 @@ func Spawn(o Options) (*Job, error) {
 	if layaMode == "" {
 		layaMode = "shadow"
 	}
-	decision := evaluateDecision(o.Root, o.Task, o.Backend, cfg)
-	if o.Backend == "auto" && layaMode == "active" && !decision.Fallback && len(decision.Answers) > 0 {
-		if selected, ok := decision.Answers[0].Value.(string); ok && (selected == "agy" || selected == "qwen" || selected == "claude") {
-			o.Backend = selected
+	decision := EvaluateLaya(o.Root, o.Task, o.Mode, o.Backend, cfg)
+	requestedMode := o.Mode
+	if layaMode == "active" {
+		if reason := ReviewReason(decision.Fallback, decision.Decision, o.Mode, o.RiskReviewed); reason != "" {
+			return nil, ReviewRequiredError{Decision: decision.Decision, Reason: reason}
+		}
+		if decision.Decision != nil && !decision.Fallback {
+			d := decision.Decision
+			if o.Mode == "auto" {
+				modeConfidence, modeMargin, modeKnown := headStats(d, "task_mode")
+				if modeKnown && modeConfidence >= .80 && modeMargin >= .15 {
+					o.Mode = d.TaskMode
+				} else {
+					o.Mode = "inspect"
+				}
+			}
 		}
 	}
+	if o.Mode == "auto" {
+		o.Mode = "inspect"
+	}
+	maxAttempts := 1
+	if layaMode == "active" && !decision.Fallback && decision.Decision != nil && o.Mode == "inspect" && decision.Decision.Retry.MaxAttempts > 1 {
+		confidence, margin, known := headStats(decision.Decision, "retry_policy")
+		if known && confidence >= .80 && margin >= .15 {
+			maxAttempts = 2
+		}
+	}
+	if err := os.MkdirAll(o.Root, 0700); err != nil {
+		return nil, err
+	}
+	lock, err := os.OpenFile(filepath.Join(o.Root, "scheduler.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return nil, err
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	roundRobinPath := filepath.Join(o.Root, "round-robin.json")
+	oldRoundRobin, roundRobinErr := os.ReadFile(roundRobinPath)
+	spawned := false
+	defer func() {
+		if spawned {
+			return
+		}
+		if roundRobinErr == nil {
+			_ = os.WriteFile(roundRobinPath, oldRoundRobin, 0600)
+		} else if os.IsNotExist(roundRobinErr) {
+			_ = os.Remove(roundRobinPath)
+		}
+	}()
 	if o.Backend == "auto" {
 		order := cfg.Scheduler.Order
 		if len(order) == 0 {
@@ -118,7 +191,12 @@ func Spawn(o Options) (*Job, error) {
 		if len(readyOrder) == 0 && authError != nil {
 			return nil, authError
 		}
-		o.Backend, err = selectBackend(o.Root, readyOrder, cfg.Backend)
+		preferred := []string(nil)
+		backendConfidence, backendMargin, backendKnown := headStats(decision.Decision, "backend")
+		if layaMode == "active" && !decision.Fallback && backendKnown && backendConfidence >= 0.80 && backendMargin >= 0.15 {
+			preferred = decision.Decision.BackendCandidates
+		}
+		o.Backend, err = selectBackend(o.Root, readyOrder, cfg.Backend, preferred, cfg.Scheduler, sessionID(o), true)
 		if err != nil {
 			return nil, err
 		}
@@ -129,11 +207,36 @@ func Spawn(o Options) (*Job, error) {
 	if authError := checkAuth(o.Backend, cfg.Backend[o.Backend]); authError != nil {
 		return nil, authError
 	}
+	if o.RequestedBackend != "auto" {
+		if _, err := selectBackend(o.Root, []string{o.Backend}, cfg.Backend, nil, cfg.Scheduler, sessionID(o), false); err != nil {
+			return nil, err
+		}
+	}
 	if o.Timeout <= 0 {
-		o.Timeout = cfg.Timeouts.Defaults[o.Mode]
+		if layaMode == "active" && decision.Decision != nil && !decision.Fallback {
+			riskConfidence, riskMargin, riskKnown := headStats(decision.Decision, "risk")
+			modeConfidence, modeMargin, modeKnown := headStats(decision.Decision, "task_mode")
+			modeOK := requestedMode != "auto" || (modeKnown && modeConfidence >= .80 && modeMargin >= .15)
+			policyConfidence, policyMargin, policyKnown := headStats(decision.Decision, "timeout_policy")
+			policyOK := !policyKnown || (policyConfidence >= .80 && policyMargin >= .15)
+			if riskKnown && riskConfidence >= .80 && riskMargin >= .15 && modeOK && policyOK {
+				o.Timeout = decision.Decision.TimeoutHintSeconds
+				if requestedMode != "auto" {
+					o.Timeout = policyTimeout(decision.Decision.TimeoutHintSeconds, o.Mode, decision.Decision.Risk, policyKnown)
+				}
+				o.TimeoutSource = "laya:" + decision.ModelVersion
+			}
+		}
+		if o.Timeout <= 0 {
+			o.Timeout = cfg.Timeouts.Defaults[o.Mode]
+		}
 	}
 	if o.Timeout < 1 || o.Timeout > cfg.Timeouts.MaxSeconds {
-		return nil, fmt.Errorf("timeout_seconds must be between 1 and %d", cfg.Timeouts.MaxSeconds)
+		if strings.HasPrefix(o.TimeoutSource, "laya:") && o.Timeout > cfg.Timeouts.MaxSeconds {
+			o.Timeout = cfg.Timeouts.MaxSeconds
+		} else {
+			return nil, fmt.Errorf("timeout_seconds must be between 1 and %d", cfg.Timeouts.MaxSeconds)
+		}
 	}
 	if o.TimeoutSource == "" {
 		o.TimeoutSource = "default:" + o.Mode
@@ -153,7 +256,7 @@ func Spawn(o Options) (*Job, error) {
 	statusPath := filepath.Join(run, "status.json")
 	worker := os.Getenv("VIOLIN_WORKER_BIN")
 	native := cfg.Backend[o.Backend].Transport != "" || cfg.Backend[o.Backend].Command != nil || len(cfg.Backend[o.Backend].CLI.Command) > 0
-	workerArgs := []string{o.Backend, "--mode", o.Mode, "-C", o.Workspace, "--task-file", taskPath, "--timeout", strconv.Itoa(o.Timeout), "--idle-timeout", strconv.Itoa(o.IdleTimeout)}
+	workerArgs := []string{o.Backend, "--mode", o.Mode, "-C", o.Workspace, "--task-file", taskPath, "--timeout", strconv.Itoa(o.Timeout), "--idle-timeout", strconv.Itoa(o.IdleTimeout), "--max-attempts", strconv.Itoa(maxAttempts)}
 	if native {
 		worker = os.Args[0]
 		workerArgs = append([]string{"worker"}, workerArgs...)
@@ -181,15 +284,60 @@ func Spawn(o Options) (*Job, error) {
 	}
 	_ = stdout.Close()
 	_ = stderr.Close()
-	d := Descriptor{AgentID: fmt.Sprintf("%d-%d", time.Now().UnixNano(), cmd.Process.Pid), Backend: o.Backend, RequestedBackend: o.RequestedBackend, PID: cmd.Process.Pid, Evidence: run, Output: outputPath, Status: statusPath, TaskFile: taskPath, Mode: o.Mode, Timeout: o.Timeout, TimeoutSource: o.TimeoutSource, IdleTimeout: o.IdleTimeout, IdleEnabled: config.IdleTimeoutEnabled(o.Backend, cfg.Backend[o.Backend]), OwnerPID: os.Getpid(), CreatedAt: time.Now(), LayaMode: layaMode, LayaFallback: decision.Fallback, LayaModelVersion: decision.ModelVersion, LayaError: decision.Error}
+	d := Descriptor{AgentID: fmt.Sprintf("%d-%d", time.Now().UnixNano(), cmd.Process.Pid), Backend: o.Backend, RequestedBackend: o.RequestedBackend, PID: cmd.Process.Pid, Lease: fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid()), Evidence: run, Output: outputPath, Status: statusPath, TaskFile: taskPath, Mode: o.Mode, Timeout: o.Timeout, TimeoutSource: o.TimeoutSource, IdleTimeout: o.IdleTimeout, IdleEnabled: config.IdleTimeoutEnabled(o.Backend, cfg.Backend[o.Backend]), OwnerPID: os.Getpid(), OwnerInstance: o.OwnerInstance, SessionID: sessionID(o), CreatedAt: time.Now(), LayaMode: layaMode, LayaFallback: decision.Fallback, LayaModelVersion: decision.ModelVersion, LayaError: decision.Error, LayaDecision: decision.Decision, RiskReviewed: o.RiskReviewed, SupervisorMode: cfg.Laya.Supervisor.Mode, SupervisorState: "starting", SupervisorStale: cfg.Laya.Supervisor.StaleSeconds, MaxAttempts: maxAttempts}
 	j := &Job{Descriptor: d, path: filepath.Join(o.Root, "jobs", d.AgentID+".json"), cmd: cmd}
 	if err = os.MkdirAll(filepath.Dir(j.path), 0700); err != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		return nil, err
 	}
 	if err = j.save(); err != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		return nil, err
 	}
+	spawned = true
 	return j, nil
+}
+
+func policyTimeout(predicted int, mode string, risk laya.Risk, trained bool) int {
+	if trained && predicted > 0 {
+		return predicted
+	}
+	if mode == "implement" || risk == laya.RiskHigh {
+		return 3600
+	}
+	return 900
+}
+
+func ReviewReason(fallback bool, decision *laya.Decision, mode string, reviewed bool) string {
+	if reviewed {
+		return ""
+	}
+	if fallback || decision == nil {
+		return "laya_fallback_or_missing_decision"
+	}
+	riskConfidence, riskMargin, riskKnown := headStats(decision, "risk")
+	if !riskKnown || riskConfidence < .80 || riskMargin < .15 {
+		return "risk_uncertain"
+	}
+	if decision.Risk == laya.RiskHigh {
+		return "high_risk"
+	}
+	if mode == "auto" {
+		modeConfidence, modeMargin, modeKnown := headStats(decision, "task_mode")
+		if !modeKnown || modeConfidence < .80 || modeMargin < .15 {
+			return "mode_uncertain"
+		}
+	}
+	return ""
+}
+
+func headStats(decision *laya.Decision, name string) (float64, float64, bool) {
+	if decision == nil {
+		return 0, 0, false
+	}
+	confidence, confidenceOK := decision.HeadConfidence[name]
+	margin, marginOK := decision.HeadMargin[name]
+	return confidence, margin, confidenceOK && marginOK
 }
 
 func checkAuth(provider string, backend config.Backend) error {
@@ -208,6 +356,9 @@ func checkAuth(provider string, backend config.Backend) error {
 }
 
 func Open(root, id string) (*Job, error) {
+	if !validID.MatchString(id) {
+		return nil, errors.New("invalid agent id")
+	}
 	path := filepath.Join(root, "jobs", id+".json")
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -217,7 +368,64 @@ func Open(root, id string) (*Job, error) {
 	if err = json.Unmarshal(data, &d); err != nil {
 		return nil, err
 	}
+	if d.AgentID != id || d.PID <= 0 || !strings.HasSuffix(id, "-"+strconv.Itoa(d.PID)) {
+		return nil, errors.New("invalid job descriptor")
+	}
+	run, err := filepath.Abs(d.Evidence)
+	if err != nil {
+		return nil, err
+	}
+	base, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	canonicalBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		return nil, err
+	}
+	canonicalRun, err := filepath.EvalSymlinks(run)
+	if err != nil {
+		return nil, err
+	}
+	if filepath.Dir(canonicalRun) != canonicalBase || !strings.HasPrefix(filepath.Base(run), d.Backend+"-") || d.Output != filepath.Join(run, "output.json") || d.Status != filepath.Join(run, "status.json") || d.TaskFile != filepath.Join(run, "task.txt") {
+		return nil, errors.New("invalid job paths")
+	}
+	for _, p := range []string{d.Output, d.Status, d.TaskFile} {
+		if resolved, e := filepath.EvalSymlinks(p); e == nil && resolved != filepath.Join(canonicalRun, filepath.Base(p)) {
+			return nil, errors.New("job path uses a symlink")
+		}
+	}
 	return &Job{Descriptor: d, path: path}, nil
+}
+
+var validID = regexp.MustCompile(`^[0-9]+-[1-9][0-9]*$`)
+
+var localLayaEngine struct {
+	sync.RWMutex
+	engine laya.Engine
+}
+
+func SetLocalLayaEngine(engine laya.Engine) {
+	localLayaEngine.Lock()
+	localLayaEngine.engine = engine
+	localLayaEngine.Unlock()
+}
+
+func ValidateFeedbackID(id string) error {
+	if !validID.MatchString(id) {
+		return errors.New("invalid agent id")
+	}
+	return nil
+}
+
+func sessionID(o Options) string {
+	if o.SessionID != "" {
+		return o.SessionID
+	}
+	if v := os.Getenv("VIOLIN_SESSION_ID"); v != "" {
+		return v
+	}
+	return fmt.Sprintf("cli-%d", os.Getpid())
 }
 func (j *Job) save() error {
 	data, err := json.MarshalIndent(j.Descriptor, "", "  ")
@@ -237,35 +445,54 @@ func (j *Job) alive() bool {
 			return false
 		}
 	}
-	if j.cmd != nil && j.cmd.ProcessState == nil {
-		return true
+	return j.workerMatches()
+}
+func (j *Job) workerMatches() bool {
+	pid := j.Descriptor.PID
+	if pid <= 0 {
+		return false
 	}
-	p, err := os.FindProcess(j.Descriptor.PID)
+	group, err := syscall.Getpgid(pid)
+	if err != nil || group != pid {
+		return false
+	}
+	output, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
 	if err != nil {
 		return false
 	}
-	return p.Signal(syscall.Signal(0)) == nil
+	command := string(output)
+	taskArg := regexp.MustCompile(`(?:^|\s)--task-file\s+` + regexp.QuoteMeta(j.Descriptor.TaskFile) + `(?:\s|$)`)
+	return taskArg.MatchString(strings.TrimSpace(command)) && (strings.Contains(command, " worker ") || strings.Contains(command, "violin-worker"))
 }
 func (j *Job) Live() map[string]any {
-	return map[string]any{"agent_id": j.Descriptor.AgentID, "status": "running", "selected_backend": j.Descriptor.Backend, "requested_backend": j.Descriptor.RequestedBackend, "evidence": j.Descriptor.Evidence, "effective_timeout_seconds": j.Descriptor.Timeout, "timeout_source": j.Descriptor.TimeoutSource, "idle_timeout_seconds": j.Descriptor.IdleTimeout, "idle_timeout_enabled": j.Descriptor.IdleEnabled, "laya_mode": j.Descriptor.LayaMode, "laya_fallback": j.Descriptor.LayaFallback, "laya_model_version": j.Descriptor.LayaModelVersion}
+	observation := j.observe()
+	return map[string]any{"agent_id": j.Descriptor.AgentID, "status": "running", "selected_backend": j.Descriptor.Backend, "requested_backend": j.Descriptor.RequestedBackend, "evidence": j.Descriptor.Evidence, "effective_timeout_seconds": j.Descriptor.Timeout, "timeout_source": j.Descriptor.TimeoutSource, "max_attempts": j.Descriptor.MaxAttempts, "idle_timeout_seconds": j.Descriptor.IdleTimeout, "idle_timeout_enabled": j.Descriptor.IdleEnabled, "risk_reviewed": j.Descriptor.RiskReviewed, "laya_mode": j.Descriptor.LayaMode, "laya_fallback": j.Descriptor.LayaFallback, "laya_model_version": j.Descriptor.LayaModelVersion, "laya_decision": j.Descriptor.LayaDecision, "supervisor_mode": j.Descriptor.SupervisorMode, "supervisor_state": observation.State, "supervisor_action": observation.Action, "supervisor_reason": observation.Reason, "supervisor_updated_at": observation.UpdatedAt, "supervisor_last_event_at": observation.LastEvent, "supervisor_event_count": observation.EventCount}
+}
+
+func (j *Job) observe() supervisor.Observation {
+	data, err := os.ReadFile(j.Descriptor.Status)
+	if err != nil {
+		return supervisor.Observe(supervisor.Status{}, j.alive(), time.Now(), supervisorStale(j.Descriptor))
+	}
+	status, err := supervisor.Parse(data)
+	if err != nil {
+		return supervisor.Observe(supervisor.Status{}, j.alive(), time.Now(), supervisorStale(j.Descriptor))
+	}
+	return supervisor.Observe(status, j.alive(), time.Now(), supervisorStale(j.Descriptor))
+}
+
+func supervisorStale(d Descriptor) time.Duration {
+	if d.SupervisorStale > 0 {
+		return time.Duration(d.SupervisorStale) * time.Second
+	}
+	return 15 * time.Second
 }
 
 func (j *Job) Wait(seconds int) (any, error) {
-	if j.cmd != nil {
-		if seconds <= 0 {
-			_ = j.cmd.Wait()
-			j.cmd = nil
-		} else {
-			done := make(chan error, 1)
-			go func() { done <- j.cmd.Wait() }()
-			select {
-			case <-done:
-				j.cmd = nil
-			case <-time.After(time.Duration(seconds) * time.Second):
-				return j.Live(), nil
-			}
-		}
-	} else if seconds > 0 {
+	if seconds < 0 {
+		return nil, errors.New("wait_seconds must be nonnegative")
+	}
+	if seconds > 0 {
 		deadline := time.Now().Add(time.Duration(seconds) * time.Second)
 		for j.alive() && time.Now().Before(deadline) {
 			time.Sleep(100 * time.Millisecond)
@@ -285,26 +512,101 @@ func (j *Job) finish() (map[string]any, error) {
 	if value == nil {
 		value = map[string]any{"status": "failed", "error_message": "worker ended without a valid report", "evidence": j.Descriptor.Evidence}
 	}
+	observation := j.observe()
+	value["supervisor_mode"] = j.Descriptor.SupervisorMode
+	value["supervisor_state"] = observation.State
+	value["supervisor_action"] = observation.Action
+	value["supervisor_reason"] = observation.Reason
+	value["supervisor_event_count"] = observation.EventCount
 	value["agent_id"] = j.Descriptor.AgentID
 	value["selected_backend"] = j.Descriptor.Backend
 	value["requested_backend"] = j.Descriptor.RequestedBackend
+	value["laya_mode"] = j.Descriptor.LayaMode
+	value["laya_fallback"] = j.Descriptor.LayaFallback
+	value["laya_model_version"] = j.Descriptor.LayaModelVersion
+	value["laya_decision"] = j.Descriptor.LayaDecision
+	value["risk_reviewed"] = j.Descriptor.RiskReviewed
+	value["max_attempts"] = j.Descriptor.MaxAttempts
+	_ = laya.AppendFeedback(filepath.Dir(j.Descriptor.Evidence), laya.FeedbackEvent{
+		AgentID: j.Descriptor.AgentID, RequestedBackend: j.Descriptor.RequestedBackend, SelectedBackend: j.Descriptor.Backend,
+		Mode: j.Descriptor.Mode, LayaMode: j.Descriptor.LayaMode, ModelVersion: j.Descriptor.LayaModelVersion,
+		Fallback: j.Descriptor.LayaFallback, Confidence: decisionConfidence(j.Descriptor.LayaDecision), Risk: decisionRisk(j.Descriptor.LayaDecision),
+		CostTier: decisionCost(j.Descriptor.LayaDecision), LatencyTier: decisionLatency(j.Descriptor.LayaDecision),
+		Outcome: reportOutcome(value), DurationSeconds: reportDuration(value), TimeoutSeconds: j.Descriptor.Timeout,
+		ErrorClass: reportErrorClass(value),
+	})
 	_ = os.Remove(j.path)
 	return value, nil
 }
+
+func decisionConfidence(decision *laya.Decision) float64 {
+	if decision == nil {
+		return 0
+	}
+	return decision.Confidence
+}
+
+func decisionRisk(decision *laya.Decision) laya.Risk {
+	if decision == nil {
+		return ""
+	}
+	return decision.Risk
+}
+
+func decisionCost(decision *laya.Decision) laya.Tier {
+	if decision == nil {
+		return ""
+	}
+	return decision.CostTier
+}
+
+func decisionLatency(decision *laya.Decision) laya.Tier {
+	if decision == nil {
+		return ""
+	}
+	return decision.LatencyTier
+}
+
+func reportOutcome(value map[string]any) string {
+	if status, ok := value["status"].(string); ok {
+		return status
+	}
+	return "unknown"
+}
+
+func reportDuration(value map[string]any) float64 {
+	if duration, ok := value["duration_seconds"].(float64); ok {
+		return duration
+	}
+	return 0
+}
+
+func reportErrorClass(value map[string]any) string {
+	if status := reportOutcome(value); status == "completed" {
+		return ""
+	}
+	if phase, ok := value["phase"].(string); ok && phase != "" {
+		return phase
+	}
+	return reportOutcome(value)
+}
 func (j *Job) Interrupt() (map[string]any, error) {
-	_ = syscall.Kill(-j.Descriptor.PID, syscall.SIGINT)
-	if j.cmd != nil {
-		done := make(chan struct{})
-		go func() { _, _ = j.cmd.Process.Wait(); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(8 * time.Second):
-		}
-	} else {
-		deadline := time.Now().Add(8 * time.Second)
-		for j.alive() && time.Now().Before(deadline) {
-			time.Sleep(50 * time.Millisecond)
-		}
+	if !j.workerMatches() {
+		return nil, errors.New("job is stale: worker identity cannot be verified")
+	}
+	if err := syscall.Kill(-j.Descriptor.PID, syscall.SIGINT); err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(8 * time.Second)
+	for j.workerMatches() && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if j.workerMatches() {
+		_ = syscall.Kill(-j.Descriptor.PID, syscall.SIGKILL)
+		time.Sleep(100 * time.Millisecond)
+	}
+	if j.workerMatches() {
+		return nil, errors.New("worker remains active after interrupt")
 	}
 	outputData, outputErr := os.ReadFile(j.Descriptor.Output)
 	var outputValue map[string]any
@@ -358,7 +660,7 @@ func List(root string) ([]map[string]any, error) {
 
 // InterruptOwned stops only jobs spawned by this server process. Descriptors
 // from an earlier server remain recoverable after restart.
-func InterruptOwned(root string, ownerPID int) {
+func InterruptOwned(root string, ownerInstance string) {
 	entries, err := os.ReadDir(filepath.Join(root, "jobs"))
 	if err != nil {
 		return
@@ -368,17 +670,18 @@ func InterruptOwned(root string, ownerPID int) {
 			continue
 		}
 		job, err := Open(root, strings.TrimSuffix(entry.Name(), ".json"))
-		if err == nil && job.Descriptor.OwnerPID == ownerPID && job.alive() {
+		if err == nil && ownerInstance != "" && job.Descriptor.OwnerInstance == ownerInstance && job.alive() {
 			_, _ = job.Interrupt()
 		}
 	}
 }
 
-func selectBackend(root string, order []string, backendConfig map[string]config.Backend) (string, error) {
+func selectBackend(root string, order []string, backendConfig map[string]config.Backend, preferred []string, scheduler config.Scheduler, session string, advance bool) (string, error) {
 	if len(order) == 0 {
 		order = []string{"agy", "qwen", "claude"}
 	}
 	counts := map[string]int{}
+	machine, sessionCount := 0, 0
 	entries, err := os.ReadDir(filepath.Join(root, "jobs"))
 	if err != nil && !os.IsNotExist(err) {
 		return "", err
@@ -390,7 +693,29 @@ func selectBackend(root string, order []string, backendConfig map[string]config.
 		job, err := Open(root, strings.TrimSuffix(entry.Name(), ".json"))
 		if err == nil && job.alive() {
 			counts[job.Descriptor.Backend]++
+			machine++
+			if job.Descriptor.SessionID == session {
+				sessionCount++
+			}
 		}
+	}
+	if machine >= scheduler.MachineMaxConcurrency || sessionCount >= scheduler.SessionMaxConcurrency {
+		return "", errors.New("worker capacity is full")
+	}
+	for _, candidate := range preferred {
+		if !contains(order, candidate) || counts[candidate] >= capacity(candidate, backendConfig) {
+			continue
+		}
+		if advance {
+			for i, name := range order {
+				if name == candidate {
+					data, _ := json.Marshal(map[string]int{"index": (i + 1) % len(order)})
+					_ = os.WriteFile(filepath.Join(root, "round-robin.json"), data, 0600)
+					break
+				}
+			}
+		}
+		return candidate, nil
 	}
 	index := 0
 	statePath := filepath.Join(root, "round-robin.json")
@@ -404,18 +729,34 @@ func selectBackend(root string, order []string, backendConfig map[string]config.
 	}
 	for offset := 0; offset < len(order); offset++ {
 		candidate := order[(index+offset)%len(order)]
-		limit := backendConfig[candidate].MaxConcurrency
-		if limit == 0 {
-			limit = 1
-		}
+		limit := capacity(candidate, backendConfig)
 		if counts[candidate] < limit {
 			next := (index + offset + 1) % len(order)
-			data, _ := json.Marshal(map[string]int{"index": next})
-			_ = os.WriteFile(statePath, data, 0600)
+			if advance {
+				data, _ := json.Marshal(map[string]int{"index": next})
+				_ = os.WriteFile(statePath, data, 0600)
+			}
 			return candidate, nil
 		}
 	}
 	return "", errors.New("worker capacity is full")
+}
+
+func contains(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func capacity(name string, backendConfig map[string]config.Backend) int {
+	limit := backendConfig[name].MaxConcurrency
+	if limit == 0 {
+		return 1
+	}
+	return limit
 }
 
 func workerEnv(cfg config.Config, backend, statusPath, root, timeoutSource string) []string {
@@ -431,17 +772,55 @@ func workerEnv(cfg config.Config, backend, statusPath, root, timeoutSource strin
 	return env
 }
 
-func evaluateDecision(root, task, requested string, cfg config.Config) laya.Result {
+func EvaluateLaya(root, task, mode, requested string, cfg config.Config) laya.Result {
 	manager, err := models.NewManager(filepath.Join(root, "models"))
 	if err != nil {
 		return laya.Result{Fallback: true, Error: err.Error()}
 	}
-	modelPath, _ := manager.ActivePath()
-	runner := cfg.Laya.Runner
-	if len(runner) == 0 {
-		runner = laya.RunnerFromEnv()
+	engine := laya.ManagedEngine{Manager: manager, Fallback: laya.FallbackEngine{}}
+	request := laya.Request{Language: laya.ProtocolLanguage, State: map[string]any{"task": task, "mode": mode}, Questions: []laya.Question{
+		{ID: "backend", Kind: laya.Choice, Prompt: "Which configured coding agent is best suited to this task?", Options: []string{"agy", "qwen", "claude"}, Fallback: requested},
+		{ID: "task_mode", Kind: laya.Choice, Prompt: "Does the task inspect or change files?", Options: []string{"inspect", "implement"}, Fallback: mode},
+		{ID: "risk", Kind: laya.Choice, Prompt: "What is the task's operational risk?", Options: []string{"low", "medium", "high"}, Fallback: "medium"},
+		{ID: "timeout_policy", Kind: laya.Choice, Prompt: "What timeout class fits the task?", Options: []string{"short", "standard", "long"}, Fallback: "standard"},
+		{ID: "retry_policy", Kind: laya.Choice, Prompt: "Should one retry be allowed?", Options: []string{"no_retry", "retry_once"}, Fallback: "no_retry"},
+	}}
+	localLayaEngine.RLock()
+	local := localLayaEngine.engine
+	localLayaEngine.RUnlock()
+	if local != nil {
+		result, localErr := local.Evaluate(request)
+		if localErr == nil {
+			if (mode == "inspect" || mode == "implement") && result.Decision != nil {
+				result.Decision.TaskMode = mode
+			}
+			applyLayaProviderSettings(&result, requested, cfg)
+			return result
+		}
+		fallback, _ := engine.Evaluate(request)
+		fallback.Fallback = true
+		fallback.Error = "upstream Laya ONNX inference failed; Go classifier fallback is in use: " + localErr.Error()
+		applyLayaProviderSettings(&fallback, requested, cfg)
+		return fallback
 	}
-	engine := laya.ManagedEngine{Manager: manager, Runner: runner, ModelPath: modelPath, Timeout: time.Duration(cfg.Laya.TimeoutSeconds) * time.Second, Fallback: laya.FallbackEngine{}}
-	result, _ := engine.Evaluate(laya.Request{Language: laya.ProtocolLanguage, State: map[string]any{"task": task}, Questions: []laya.Question{{ID: "backend", Kind: laya.Choice, Options: []string{"agy", "qwen", "claude"}, Fallback: requested}}})
+	result, _ := engine.Evaluate(request)
+	result.Fallback = true
+	if result.Error == "" {
+		result.Error = "upstream Laya ONNX runtime is not available; Go classifier fallback is in use"
+	}
+	applyLayaProviderSettings(&result, requested, cfg)
 	return result
+}
+
+func applyLayaProviderSettings(result *laya.Result, requested string, cfg config.Config) {
+	if result == nil || result.Decision == nil {
+		return
+	}
+	backend := requested
+	if backend == "" || backend == "auto" {
+		if len(result.Decision.BackendCandidates) > 0 {
+			backend = result.Decision.BackendCandidates[0]
+		}
+	}
+	result.Decision.IdleTimeoutEnabled = config.IdleTimeoutEnabled(backend, cfg.Backend[backend])
 }

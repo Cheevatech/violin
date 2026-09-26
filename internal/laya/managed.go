@@ -1,94 +1,55 @@
 package laya
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
-	"strings"
-	"time"
+	"path/filepath"
 
 	"github.com/film/violin/internal/models"
 )
 
-// ManagedEngine keeps model ownership inside violin while allowing the
-// inference implementation to evolve independently of the control plane.
-// When no verified runtime is configured it is deliberately fail-safe and
-// returns typed fallback answers rather than silently pretending Laya ran.
+// ManagedEngine provides Violin's Go classifier fallback when upstream ONNX
+// inference is unavailable. It never starts a child process.
 type ManagedEngine struct {
 	Manager   *models.Manager
-	Runner    []string
 	ModelPath string
-	Timeout   time.Duration
 	Fallback  FallbackEngine
 }
 
 func (e ManagedEngine) Evaluate(request Request) (Result, error) {
-	status := models.Status{}
+	modelPath := e.ModelPath
 	if e.Manager != nil {
-		status = e.Manager.Status()
+		status := e.Manager.Status()
 		if !status.Verified {
 			return e.fallback(request, ErrUnavailable)
 		}
-		if e.ModelPath == "" {
-			e.ModelPath, _ = e.Manager.ActivePath()
+		if modelPath == "" {
+			modelPath, _ = e.Manager.ActivePath()
 		}
 	}
-	if len(e.Runner) == 0 {
+	if modelPath == "" {
 		return e.fallback(request, ErrUnavailable)
 	}
-	timeout := e.Timeout
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-	commandContext, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	command := exec.CommandContext(commandContext, e.Runner[0], e.Runner[1:]...)
-	command.Env = append(os.Environ(), "VIOLIN_LAYA_MODEL_DIR="+e.ModelPath)
-	input, err := json.Marshal(request)
+	model, err := LoadModel(filepath.Join(modelPath, "model.json"))
 	if err != nil {
 		return e.fallback(request, err)
 	}
-	command.Stdin = strings.NewReader(string(input) + "\n")
-	output, err := command.Output()
-	if err != nil {
-		if errors.Is(commandContext.Err(), context.DeadlineExceeded) {
-			return e.fallback(request, errors.New("Laya runner timed out"))
-		}
-		return e.fallback(request, err)
-	}
-	var result Result
-	if err = json.Unmarshal(output, &result); err != nil {
-		return e.fallback(request, err)
-	}
-	if result.ModelVersion == "" && status.Manifest != nil {
-		result.ModelVersion = status.Manifest.Version
-	}
-	return result, nil
+	return model.Evaluate(request)
 }
 
-func RunnerFromEnv() []string {
-	value := strings.TrimSpace(os.Getenv("VIOLIN_LAYA_RUNNER"))
-	if value == "" {
-		return nil
+func (e ManagedEngine) fallback(request Request, cause error) (Result, error) {
+	if cause == nil {
+		cause = errors.New("Go classifier fallback is unavailable")
 	}
-	var runner []string
-	if json.Unmarshal([]byte(value), &runner) != nil || len(runner) == 0 || strings.TrimSpace(runner[0]) == "" {
-		return nil
-	}
-	return runner
-}
-
-func (e ManagedEngine) fallback(request Request, err error) (Result, error) {
 	fallback := e.Fallback
 	if fallback.ModelVersion == "" {
 		fallback.ModelVersion = os.Getenv("VIOLIN_LAYA_MODEL_VERSION")
 	}
-	result, fallbackErr := fallback.Evaluate(request)
-	result.Error = err.Error()
-	if fallbackErr != nil {
-		return result, fallbackErr
+	result, err := fallback.Evaluate(request)
+	result.Fallback = true
+	result.Error = cause.Error()
+	if err != nil {
+		return result, err
 	}
 	return result, nil
 }

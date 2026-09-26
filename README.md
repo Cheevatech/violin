@@ -6,6 +6,7 @@ Install the public launcher without installing Go or Python:
 
 ```bash
 npx @cheevatech/violin doctor
+npx @cheevatech/violin install
 npx @cheevatech/violin init --dry-run
 npx @cheevatech/violin init --apply
 npx @cheevatech/violin uninstall --dry-run
@@ -19,6 +20,12 @@ npx @cheevatech/violin auth login claude
 npx @cheevatech/violin auth login qwen
 npx @cheevatech/violin auth set qwen-api < /path/to/qwen-api-key.txt
 ```
+
+The bundled public skill is a single `$violin` entrypoint covering delegation,
+implementation, review, and security. `skills install` migrates the previous
+managed `violin-implement`, `violin-review`, and `violin-security` directories
+after creating a backup. `$violin-external-delegation` remains an optional
+personal skill for installations that already provide it.
 
 The npm launcher downloads a platform-specific Go release binary and verifies
 its checksum before execution. Release targets are macOS/Linux on x64/arm64.
@@ -46,6 +53,7 @@ The repository now contains a Go control-plane binary built with `make go-build`
 
 ```bash
 ./bin/violin mcp
+./bin/violin install
 ./bin/violin run --backend auto -C /absolute/workspace --task-file /path/task
 ./bin/violin model status
 ./bin/violin model verify
@@ -54,23 +62,40 @@ The repository now contains a Go control-plane binary built with `make go-build`
 
 The Go binary owns MCP, job lifecycle, evidence descriptors, provider health,
 and model activation.
-The Laya English checkpoint is a separately versioned artifact managed under the
-shared worker state directory. Its manifest must declare `language: "en"`;
+`violin install` also installs the built-in Go Laya inference engine's verified
+English model under the shared worker state directory. Its manifest must declare `language: "en"`;
 multilingual checkpoints are intentionally outside this control-plane contract.
 Activation is atomic and checksum failures leave the current model untouched.
-Set `[laya].runner` to a JSON-argv model runtime and choose `shadow`,
+Set `[laya].runner` only for development adapters and choose `shadow`,
 `advisory`, or `active` in `[laya].mode`. The runtime receives the verified
 active model directory as `VIOLIN_LAYA_MODEL_DIR`; `VIOLIN_LAYA_RUNNER` and
 `VIOLIN_LAYA_MODE` are environment overrides. Shadow and advisory modes record
-decisions without changing backend selection; active mode can change only an
-auto-selected backend after verified model inference succeeds.
-Laya decisions are initially fallback-safe and can
-be rolled out from shadow to advisory to active mode without changing provider
-worker commands. A base Laya checkpoint must not be treated as production
-routing policy until violin has a domain-tuned, calibrated artifact and replay
-benchmarks; when no verified runtime is available, deterministic scheduler
-policy remains authoritative. The existing Python entrypoints remain available
-as a compatibility path during migration.
+decisions without changing execution policy. Active mode uses confidence and
+margin per policy head for backend, task mode, risk, timeout, and retry.
+High-risk, uncertain-risk, and fallback decisions return `review_required`
+without spawning unless the caller confirms a second request with
+`risk_reviewed: true`. Explicit caller mode and timeout values take precedence.
+Automatic retry is limited to provider failures during inspect jobs and stops
+when the workspace snapshot changes; timeout, cancellation, and side-effecting
+jobs are not retried.
+
+Train from a reviewed English JSONL dataset with separate `train` and `holdout`
+records containing `task`, `backend`, `task_mode`, `risk`, `timeout_policy`
+(`short`, `standard`, or `long`), `retry_policy` (`never` or `inspect_once`),
+`language: "en"`, `split`, and `reviewed: true`. Training rejects records
+without the explicit English language label. Keep holdout data independent and do not put raw
+production prompts in it. `./bin/violin model train --dataset reviewed.jsonl --version v3` installs
+a candidate only when each label has at least 100 holdout examples, automatic
+precision is at least 95%, high-risk recall is 100%, and per-head ECE is at most
+0.10. Training never activates a candidate. Review it, then explicitly run
+`./bin/violin model activate v3`; retain the previous version for rollback.
+`laya_feedback` stores corrected labels and outcome by job ID without task text;
+these events do not become training examples automatically. `model recalibrate`
+remains a metadata summary. Keep Laya in shadow until a candidate passes replay
+and operational tests. A base checkpoint is not production routing policy;
+when no verified model is available, deterministic scheduler policy remains
+authoritative. The existing Python entrypoints remain available as a
+compatibility path during migration.
 
 ## External workers under Codex supervision
 
@@ -186,28 +211,31 @@ provider. A custom model missing from the catalog is `degraded`, not synthetic
 inspect a specific cache file.
 
 Each run contains an atomic `status.json` with only phase, last activity,
-elapsed time, PID, hard-timeout deadline, command type, and evidence directory.
-The supported phases are `starting`, `metadata_check`, `backend_starting`,
-`turn_started`, `reasoning`, `command_started`, `command_completed`,
-`completed`, `failed`, `timeout`, and `interrupted`. `wait_agent` returns this
-snapshot, including phase and evidence, when its wait interval expires. The
-worker idle timeout defaults to 300 seconds and measures time since the last
-event or heartbeat; configure it with `--idle-timeout` or
-`idle_timeout_seconds` on `spawn_agent`. Built-in Qwen and AGY adapters do not
-apply idle timeout because their provider progress streams are not reliable;
-they rely on the hard task timeout instead of falsely treating normal
-reasoning time as idle. Custom commands still use idle timeout, and a
-recognized Qwen command-execution item keeps the worker alive until completion.
+elapsed time, PID, evidence directory, effective timeout policy, heartbeat
+timestamps, and event count. The current lifecycle states are `starting`,
+`progressing`, `reasoning`, `stalled`, `completed`, `failed`, and
+`interrupted`. `wait_agent` returns this snapshot, including supervisor state
+and evidence, when its wait interval expires. The worker idle timeout defaults
+to 300 seconds and measures time since the last event or heartbeat; configure
+it with `--idle-timeout` or `idle_timeout_seconds` on `spawn_agent`. Built-in
+Qwen and AGY adapters do not apply idle timeout because their provider progress
+streams are not reliable; they rely on the hard task timeout instead of
+falsely treating normal reasoning time as idle. Custom commands still use idle
+timeout.
 
-When a run stops, inspect `report.json`, `status.json`, `metadata.json`,
-`process.json`, `stdout.log`, and `stderr.log` under the reported evidence path.
-`metadata_unavailable`, `qwen_unhealthy`, `provider_error`,
-`empty_final_response`, `idle_timeout`, `timeout`, `no_changes`, and
-`interrupted` identify different failure causes. A worker
-PID is recorded in `process.json`; the long-running `violin-agent-server` has a
-different parent process and owns the MCP stdio pipe. The investigated incident
-occurred after a successful shell command during turn progression, which is why
-command completion and later silence are tracked separately.
+The Go MCP server also exposes Laya tools in the same server: `laya_route`,
+`laya_review_risk`, `laya_check_job`, `laya_wait_job`,
+`laya_explain_decision`, and `laya_feedback`. Route and risk review are
+read-only; feedback stores reviewed policy labels without task text. They reuse
+Violin's existing job descriptors, evidence, supervisor, and verified English
+model; there is no separate Laya MCP server.
+
+When a run stops, inspect `report.json`, `status.json`, `task.txt`,
+`output.json`, `stdout.log`, and `stderr.log` under the reported evidence path.
+`provider_error`, `idle_timeout`, `timeout`, and `interrupted` identify common
+failure causes. The descriptor persists the worker PID and lease so a new Go
+MCP process can recover jobs while the process is still alive; completed jobs
+are finalized from their report and their descriptor is cleaned up.
 
 Qwen currently reports zero usage through this gateway; that is missing metering,
 not proof of zero tokens. No percentage of Codex token savings is claimed.

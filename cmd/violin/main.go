@@ -3,20 +3,25 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/film/violin/internal/auth"
 	"github.com/film/violin/internal/config"
 	"github.com/film/violin/internal/credentials"
 	"github.com/film/violin/internal/health"
 	"github.com/film/violin/internal/jobs"
+	"github.com/film/violin/internal/laya"
 	"github.com/film/violin/internal/mcp"
 	"github.com/film/violin/internal/models"
 	"github.com/film/violin/internal/setup"
@@ -38,6 +43,8 @@ func main() {
 		}
 	case "init":
 		err = installMCP(os.Args[2:])
+	case "install":
+		err = installRuntime()
 	case "uninstall":
 		err = uninstallMCP(os.Args[2:])
 	case "skills":
@@ -75,11 +82,33 @@ func workerCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	return worker.Run(context.Background(), options)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return worker.Run(ctx, options)
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: violin {mcp|init|uninstall|skills|auth|health|run|wait|list|interrupt|config|model}")
+	fmt.Fprintln(os.Stderr, "usage: violin {install|mcp|init|uninstall|skills|auth|health|run|wait|list|interrupt|config|model}")
+}
+
+func installRuntime() error {
+	if _, err := setup.LayaAdvisoryPlan(true); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := laya.EnsureDefaultModel(root()); err != nil {
+		return err
+	}
+	if err := laya.EnsureUpstream(context.Background(), root()); err != nil {
+		return err
+	}
+	if _, err := setup.ConfigPlan(true); err != nil && !strings.Contains(err.Error(), "already exists") {
+		return err
+	}
+	plan, err := setup.MCPPlan(os.Args[0], true)
+	if err != nil {
+		return err
+	}
+	return printJSON(map[string]any{"action": "install", "upstream_laya": laya.UpstreamRuntimeStatus(root()), "classifier_fallback": laya.DefaultModelVersion, "mcp": plan})
 }
 
 func healthCommand(args []string) error {
@@ -352,7 +381,7 @@ func configCommand(args []string) error {
 
 func modelCommand(args []string) error {
 	if len(args) < 1 {
-		return errors.New("model requires status, verify, rollback, or update")
+		return errors.New("model requires status, verify, rollback, activate, train, update, or recalibrate")
 	}
 	m, err := models.NewManager(filepath.Join(root(), "models"))
 	if err != nil {
@@ -360,7 +389,7 @@ func modelCommand(args []string) error {
 	}
 	switch args[0] {
 	case "status":
-		return printJSON(m.Status())
+		return printJSON(map[string]any{"classifier": m.Status(), "upstream_laya": laya.UpstreamRuntimeStatus(root())})
 	case "verify":
 		return m.Verify()
 	case "rollback":
@@ -368,6 +397,53 @@ func modelCommand(args []string) error {
 			return errors.New("model rollback requires version")
 		}
 		return m.Rollback(args[1])
+	case "activate":
+		if len(args) != 2 {
+			return errors.New("model activate requires version")
+		}
+		if err := m.Activate(args[1]); err != nil {
+			return err
+		}
+		return printJSON(m.Status())
+	case "train":
+		fs := flag.NewFlagSet("model train", flag.ContinueOnError)
+		dataset := fs.String("dataset", "", "reviewed JSONL dataset with train/holdout splits")
+		version := fs.String("version", "", "candidate model version")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *dataset == "" || *version == "" {
+			return errors.New("model train requires --dataset and --version")
+		}
+		examples, err := laya.LoadDataset(*dataset)
+		if err != nil {
+			return err
+		}
+		candidate, report, err := laya.TrainDataset(examples, *version)
+		if err != nil {
+			return err
+		}
+		if !report.MeetsGate {
+			return printJSON(map[string]any{"status": "rejected", "report": report})
+		}
+		modelData, err := json.MarshalIndent(candidate, "", "  ")
+		if err != nil {
+			return err
+		}
+		source, err := os.MkdirTemp(root(), ".laya-candidate-")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(source)
+		if err := os.WriteFile(filepath.Join(source, "model.json"), modelData, 0600); err != nil {
+			return err
+		}
+		hash := sha256.Sum256(modelData)
+		manifest := models.Manifest{ID: models.DefaultModelID, Language: models.DefaultLanguage, Version: *version, Runtime: "builtin-go", Artifacts: []models.Artifact{{Path: "model.json", SHA256: hex.EncodeToString(hash[:]), Size: int64(len(modelData))}}}
+		if err := m.Install(manifest, source, false); err != nil {
+			return err
+		}
+		return printJSON(map[string]any{"status": "candidate_installed", "activated": false, "version": *version, "report": report})
 	case "update":
 		fs := flag.NewFlagSet("model update", flag.ContinueOnError)
 		manifestPath := fs.String("manifest", "", "manifest JSON")
@@ -396,6 +472,12 @@ func modelCommand(args []string) error {
 			return err
 		}
 		return printJSON(m.Status())
+	case "recalibrate":
+		report, err := laya.Recalibrate(root())
+		if err != nil {
+			return err
+		}
+		return printJSON(report)
 	default:
 		return errors.New("unknown model command")
 	}

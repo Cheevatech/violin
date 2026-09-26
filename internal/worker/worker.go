@@ -3,6 +3,8 @@ package worker
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -12,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,11 +24,16 @@ import (
 )
 
 type Options struct {
-	Backend, Mode, Workspace, TaskFile string
-	Timeout, IdleTimeout               int
-	IdleTimeoutEnabled                 bool
-	baseline                           []string
+	Backend, Mode, Workspace, TaskFile          string
+	Timeout, IdleTimeout, MaxAttempts, Attempts int
+	IdleTimeoutEnabled                          bool
+	HeartbeatSeconds                            int
+	StartedAt                                   time.Time
+	baseline                                    []string
+	baselineDigest                              string
 }
+
+var statusWriteMu sync.Mutex
 
 type executionError struct {
 	status string
@@ -49,6 +57,7 @@ func Parse(args []string) (Options, error) {
 	taskFile := fs.String("task-file", "", "task file")
 	timeout := fs.Int("timeout", 900, "timeout seconds")
 	idleTimeout := fs.Int("idle-timeout", 300, "idle timeout seconds")
+	maxAttempts := fs.Int("max-attempts", 1, "maximum provider attempts")
 	if len(args) == 0 {
 		return Options{}, errors.New("worker requires backend")
 	}
@@ -62,12 +71,18 @@ func Parse(args []string) (Options, error) {
 	if err != nil {
 		return Options{}, err
 	}
-	return Options{Backend: args[0], Mode: *mode, Workspace: workspacePath, TaskFile: *taskFile, Timeout: *timeout, IdleTimeout: *idleTimeout}, nil
+	return Options{Backend: args[0], Mode: *mode, Workspace: workspacePath, TaskFile: *taskFile, Timeout: *timeout, IdleTimeout: *idleTimeout, MaxAttempts: *maxAttempts}, nil
 }
 
 func Run(ctx context.Context, options Options) error {
+	if options.MaxAttempts == 0 {
+		options.MaxAttempts = 1
+	}
 	if options.Timeout < 1 {
 		return errors.New("worker timeout must be positive")
+	}
+	if options.MaxAttempts < 1 || options.MaxAttempts > 2 {
+		return errors.New("worker max attempts must be 1 or 2")
 	}
 	task, err := os.ReadFile(options.TaskFile)
 	if err != nil {
@@ -79,37 +94,116 @@ func Run(ctx context.Context, options Options) error {
 	}
 	backend := settings.Backend[options.Backend]
 	options.baseline = gitFiles(options.Workspace)
+	options.baselineDigest = workspaceDigest(options.Workspace)
+	options.HeartbeatSeconds = settings.Laya.Supervisor.HeartbeatSeconds
+	if options.HeartbeatSeconds < 1 {
+		options.HeartbeatSeconds = 5
+	}
 	started := time.Now()
+	options.StartedAt = started
+	stopHeartbeat := startHeartbeat(options, started)
+	defer stopHeartbeat()
 	writeStatus("starting", options, started)
 	writeStatus("running", options, started)
-	var text string
-	var usage any
 	cliCommand := backend.CLI.Command
 	if len(cliCommand) == 0 {
 		cliCommand = commandParts(backend.Command)
 	}
 	options.IdleTimeoutEnabled = config.IdleTimeoutEnabled(options.Backend, backend)
-	if backend.Transport == "api" || (backend.Transport == "auto" && len(cliCommand) == 0) {
-		provider, err := providers.FromConfigProvider(ctx, settings, credentials.Default(), options.Backend)
-		if err != nil {
+	var text string
+	var usage any
+	maxAttempts := options.MaxAttempts
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		options.Attempts = attempt
+		retryableProviderFailure := false
+		if backend.Transport == "api" || (backend.Transport == "auto" && len(cliCommand) == 0) {
+			provider, providerErr := providers.FromConfigProvider(ctx, settings, credentials.Default(), options.Backend)
+			if providerErr == nil {
+				var result providers.Result
+				result, providerErr = provider.Execute(ctx, providers.Request{Task: string(task), Workspace: options.Workspace, Mode: options.Mode, Timeout: time.Duration(options.Timeout) * time.Second})
+				if providerErr == nil {
+					text, usage = result.Text, result.Usage
+				} else {
+					retryableProviderFailure = !errors.Is(providerErr, context.DeadlineExceeded) && !errors.Is(providerErr, context.Canceled)
+				}
+			}
+			err = providerErr
+		} else {
+			text, err = runCLI(ctx, cliCommand, string(task), options)
+			var execution executionError
+			retryableProviderFailure = errors.As(err, &execution) && execution.status == "provider_error"
+		}
+		if err == nil {
+			options.Attempts = attempt
+			break
+		}
+		currentDigest := workspaceDigest(options.Workspace)
+		if !retryableProviderFailure || options.Mode != "inspect" || attempt == maxAttempts || ctx.Err() != nil || options.baselineDigest == "" || currentDigest == "" || currentDigest != options.baselineDigest {
+			stopHeartbeat()
 			return writeFailure(options, started, err)
 		}
-		result, err := provider.Execute(ctx, providers.Request{Task: string(task), Workspace: options.Workspace, Mode: options.Mode, Timeout: time.Duration(options.Timeout) * time.Second})
-		if err != nil {
-			return writeFailure(options, started, err)
-		}
-		text, usage = result.Text, result.Usage
-	} else {
-		text, err = runCLI(ctx, cliCommand, string(task), options)
-		if err != nil {
-			return writeFailure(options, started, err)
+		select {
+		case <-ctx.Done():
+			stopHeartbeat()
+			return writeFailure(options, started, ctx.Err())
+		case <-time.After(2 * time.Second):
 		}
 	}
 	if strings.TrimSpace(text) == "" {
+		stopHeartbeat()
 		return writeFailure(options, started, errors.New("provider returned an empty response"))
 	}
+	stopHeartbeat()
 	writeStatus("completed", options, started)
 	return writeReport(options, started, "completed", 0, text, usage, "")
+}
+
+func workspaceDigest(workspace string) string {
+	status, err := exec.Command("git", "-C", workspace, "status", "--porcelain", "-z").Output()
+	if err != nil {
+		return ""
+	}
+	diff, err := exec.Command("git", "-C", workspace, "diff", "HEAD", "--binary").Output()
+	if err != nil {
+		return ""
+	}
+	untracked, err := exec.Command("git", "-C", workspace, "ls-files", "--others", "--exclude-standard", "-z").Output()
+	if err != nil {
+		return ""
+	}
+	ignored, err := exec.Command("git", "-C", workspace, "ls-files", "--others", "--ignored", "--exclude-standard", "-z").Output()
+	if err != nil {
+		return ""
+	}
+	hash := sha256.New()
+	_, _ = hash.Write(status)
+	_, _ = hash.Write(diff)
+	for _, name := range bytes.Split(append(untracked, ignored...), []byte{0}) {
+		if len(name) == 0 {
+			continue
+		}
+		path := filepath.Join(workspace, string(name))
+		info, err := os.Lstat(path)
+		if err != nil || info.Size() > 8*1024*1024 || (!info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0) {
+			return ""
+		}
+		var data []byte
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, readErr := os.Readlink(path)
+			if readErr != nil {
+				return ""
+			}
+			data = []byte(target)
+		} else {
+			data, err = os.ReadFile(path)
+			if err != nil {
+				return ""
+			}
+		}
+		_, _ = hash.Write(name)
+		_, _ = hash.Write(data)
+	}
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
 func commandParts(value any) []string {
@@ -133,7 +227,11 @@ func runCLI(parent context.Context, command []string, task string, options Optio
 	if len(command) == 0 {
 		return "", errors.New("CLI transport is not configured")
 	}
-	values := map[string]string{"workspace": options.Workspace, "task_file": options.TaskFile, "mode": options.Mode, "timeout": fmt.Sprint(options.Timeout)}
+	started := options.StartedAt
+	if started.IsZero() {
+		started = time.Now()
+	}
+	values := map[string]string{"workspace": options.Workspace, "task": task, "task_file": options.TaskFile, "mode": options.Mode, "timeout": fmt.Sprint(options.Timeout)}
 	argv := make([]string, len(command))
 	for i, value := range command {
 		for key, replacement := range values {
@@ -169,6 +267,7 @@ func runCLI(parent context.Context, command []string, task string, options Optio
 		for {
 			count, err := reader.Read(buffer)
 			if count > 0 {
+				writeStatus("running", options, started)
 				data = append(data, buffer[:count]...)
 				select {
 				case activity <- struct{}{}:
@@ -230,13 +329,13 @@ func runCLI(parent context.Context, command []string, task string, options Optio
 			waitErr = err
 			waitCh = nil
 		case <-parent.Done():
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			stopCLI(cmd, waitCh)
 			return "", executionError{status: "interrupted", err: parent.Err()}
 		case <-hard.C:
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			stopCLI(cmd, waitCh)
 			return "", executionError{status: "timeout", err: fmt.Errorf("worker exceeded timeout of %d seconds", options.Timeout)}
 		case <-idleChannel(idle):
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			stopCLI(cmd, waitCh)
 			return "", executionError{status: "idle_timeout", err: fmt.Errorf("worker exceeded idle timeout of %d seconds", options.IdleTimeout)}
 		}
 	}
@@ -247,6 +346,21 @@ func runCLI(parent context.Context, command []string, task string, options Optio
 		return "", executionError{status: "provider_error", err: fmt.Errorf("%s: %w", argv[0], waitErr)}
 	}
 	return parseProviderOutput(bytes.TrimSpace(append(output, errorOutput...)), options.Backend)
+}
+
+func stopCLI(cmd *exec.Cmd, wait <-chan error) {
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGINT)
+	if wait != nil {
+		select {
+		case <-wait:
+		case <-time.After(3 * time.Second):
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			<-wait
+		}
+	}
+	if syscall.Kill(-cmd.Process.Pid, 0) == nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 }
 
 func parseCLIOutput(data []byte) string {
@@ -350,6 +464,9 @@ func eventText(event map[string]any) string {
 
 func writeFailure(options Options, started time.Time, err error) error {
 	status := "provider_error"
+	if errors.Is(err, context.Canceled) {
+		status = "interrupted"
+	}
 	var execution executionError
 	if errors.As(err, &execution) {
 		status = execution.status
@@ -376,7 +493,10 @@ func writeReport(options Options, started time.Time, status string, exitCode int
 	if len(summary) > summaryLimit {
 		summary = summary[:summaryLimit]
 	}
-	report := map[string]any{"status": status, "backend": options.Backend, "exit_code": exitCode, "duration_seconds": time.Since(started).Seconds(), "evidence": run, "phase": status, "metadata_status": "not_applicable", "smoke_status": "not_applicable", "final_message_seen": strings.TrimSpace(text) != "", "changed_files": changed, "git_diff_check": diffCheck, "effective_timeout_seconds": options.Timeout, "timeout_source": timeoutSource(options), "idle_timeout_seconds": idleTimeout, "idle_timeout_enabled": idleEnabled, "summary": summary, "summary_truncated": len(text) > summaryLimit, "supervisor_review_required": true, "usage": usage}
+	if options.Attempts < 1 {
+		options.Attempts = 1
+	}
+	report := map[string]any{"status": status, "backend": options.Backend, "exit_code": exitCode, "attempts": options.Attempts, "max_attempts": options.MaxAttempts, "duration_seconds": time.Since(started).Seconds(), "evidence": run, "phase": status, "metadata_status": "not_applicable", "smoke_status": "not_applicable", "final_message_seen": strings.TrimSpace(text) != "", "changed_files": changed, "git_diff_check": diffCheck, "effective_timeout_seconds": options.Timeout, "timeout_source": timeoutSource(options), "idle_timeout_seconds": idleTimeout, "idle_timeout_enabled": idleEnabled, "summary": summary, "summary_truncated": len(text) > summaryLimit, "supervisor_review_required": true, "usage": usage}
 	if errorMessage != "" {
 		report["error_message"] = errorMessage
 	}
@@ -405,7 +525,7 @@ func gitFiles(workspace string) []string {
 		return []string{}
 	}
 	var result []string
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+	for _, line := range strings.Split(strings.TrimRight(string(output), "\r\n"), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
@@ -441,6 +561,12 @@ func gitDiffCheck(workspace string) map[string]any {
 }
 
 func writeStatus(phase string, options Options, started time.Time) {
+	writeStatusState(phase, stateForPhase(phase), true, options, started)
+}
+
+func writeStatusState(phase, state string, event bool, options Options, started time.Time) {
+	statusWriteMu.Lock()
+	defer statusWriteMu.Unlock()
 	path := os.Getenv("VIOLIN_WORKER_STATUS")
 	if path == "" {
 		return
@@ -450,6 +576,68 @@ func writeStatus(phase string, options Options, started time.Time) {
 		idleTimeout = 1
 	}
 	idleEnabled := options.IdleTimeoutEnabled
-	data, _ := json.Marshal(map[string]any{"phase": phase, "pid": os.Getpid(), "elapsed_seconds": time.Since(started).Seconds(), "evidence": os.Getenv("VIOLIN_WORKER_EVIDENCE"), "effective_timeout_seconds": options.Timeout, "timeout_source": timeoutSource(options), "idle_timeout_seconds": idleTimeout, "idle_timeout_enabled": idleEnabled})
-	_ = os.WriteFile(path, data, 0600)
+	value := map[string]any{"status_version": 1, "phase": phase, "supervisor_state": state, "pid": os.Getpid(), "updated_at": time.Now().UTC(), "elapsed_seconds": time.Since(started).Seconds(), "evidence": os.Getenv("VIOLIN_WORKER_EVIDENCE"), "effective_timeout_seconds": options.Timeout, "timeout_source": timeoutSource(options), "idle_timeout_seconds": idleTimeout, "idle_timeout_enabled": idleEnabled}
+	if data, err := os.ReadFile(path); err == nil {
+		var previous map[string]any
+		if json.Unmarshal(data, &previous) == nil {
+			if previous["last_event_at"] != nil {
+				value["last_event_at"] = previous["last_event_at"]
+			}
+			if previous["event_count"] != nil {
+				value["event_count"] = previous["event_count"]
+			}
+		}
+	}
+	if event {
+		value["last_event_at"] = value["updated_at"]
+		count, _ := value["event_count"].(float64)
+		value["event_count"] = int(count) + 1
+	}
+	data, _ := json.Marshal(value)
+	temporary := path + ".tmp"
+	if os.WriteFile(temporary, data, 0600) == nil {
+		_ = os.Rename(temporary, path)
+	}
+}
+
+func stateForPhase(phase string) string {
+	switch phase {
+	case "starting":
+		return "starting"
+	case "completed":
+		return "completed"
+	case "interrupted":
+		return "interrupted"
+	case "timeout", "idle_timeout", "provider_error":
+		return "failed"
+	default:
+		return "progressing"
+	}
+}
+
+func startHeartbeat(options Options, started time.Time) func() {
+	interval := options.HeartbeatSeconds
+	if interval < 1 {
+		interval = 5
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	var stopOnce sync.Once
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(time.Duration(interval) * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				writeStatusState("running", "reasoning", false, options, started)
+			case <-stop:
+				return
+			}
+		}
+	}()
+	return func() {
+		stopOnce.Do(func() { close(stop) })
+		<-done
+	}
 }

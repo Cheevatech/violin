@@ -25,6 +25,8 @@ const (
 	configEnd   = "# END VIOLIN CONFIG"
 )
 
+var legacySkillDirectories = []string{"violin-implement", "violin-review", "violin-security"}
+
 type Plan struct {
 	Action  string `json:"action"`
 	Target  string `json:"target"`
@@ -139,6 +141,33 @@ func ConfigPlan(apply bool) (Plan, error) {
 	return plan, nil
 }
 
+// LayaAdvisoryPlan safely lowers an existing active policy before upstream
+// checkpoint parity and Violin holdout evaluation are complete.
+func LayaAdvisoryPlan(apply bool) (Plan, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return Plan{}, err
+	}
+	target := filepath.Join(home, ".config", "violin", "config.toml")
+	original, err := os.ReadFile(target)
+	if err != nil {
+		return Plan{}, err
+	}
+	updated := strings.Replace(string(original), "[laya]\nmode = \"active\"", "[laya]\nmode = \"advisory\"", 1)
+	if updated == string(original) {
+		return Plan{Action: "laya_advisory", Target: target, Apply: apply, Changes: "no active Laya policy found"}, nil
+	}
+	plan := Plan{Action: "laya_advisory", Target: target, Apply: apply, Changes: diffSummary(string(original), updated)}
+	if !apply {
+		return plan, nil
+	}
+	backup, err := writeBackupAndAtomic(target, []byte(updated))
+	if err != nil {
+		return Plan{}, err
+	}
+	plan.Backup = backup
+	return plan, nil
+}
 const configTemplate = configStart + `
 # Public policy only. Keep API keys in environment variables or the OS keychain.
 
@@ -156,9 +185,18 @@ inspect = 900
 implement = 3600
 
 [laya]
-mode = "shadow"
+mode = "advisory"
 timeout_seconds = 10
-# runner = ["your-laya-runtime"]
+# The Go binary includes the Laya inference engine. The install command installs
+# violin install provisions pinned upstream Laya ONNX checkpoints and the Go runtime.
+
+[laya.supervisor]
+mode = "shadow"
+heartbeat_seconds = 5
+stale_seconds = 15
+extension_seconds = 300
+max_extensions = 2
+max_retries = 1
 
 # Configure one or more providers explicitly. Examples:
 # [backend.qwen]
@@ -192,7 +230,7 @@ func SkillsPlan(sourceDir string, apply bool) (Plan, error) {
 		sourceDir = filepath.Join("skills")
 	}
 	target := filepath.Join(home, ".codex", "skills", "violin")
-	planning := Plan{Action: "skills_install", Target: target, Apply: apply, Changes: "install bundled Violin skills"}
+	planning := Plan{Action: "skills_install", Target: target, Apply: apply, Changes: "install unified Violin skill and migrate legacy skill directories"}
 	if !apply {
 		return planning, nil
 	}
@@ -213,6 +251,9 @@ func SkillsPlan(sourceDir string, apply bool) (Plan, error) {
 			return Plan{}, err
 		}
 		planning.Backup = backup
+		if err := removeLegacySkillDirectories(target); err != nil {
+			return Plan{}, err
+		}
 	}
 	if _, err := os.Stat(sourceDir); err == nil {
 		if err := copyTree(sourceDir, target); err != nil {
@@ -229,6 +270,21 @@ func SkillsPlan(sourceDir string, apply bool) (Plan, error) {
 		return Plan{}, err
 	}
 	return planning, nil
+}
+
+func removeLegacySkillDirectories(target string) error {
+	for _, name := range legacySkillDirectories {
+		path := filepath.Join(target, name)
+		if _, err := os.Lstat(path); os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		if err := os.RemoveAll(path); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func copyEmbeddedTree(target string) error {

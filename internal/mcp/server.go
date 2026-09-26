@@ -3,18 +3,21 @@ package mcp
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
-	"strconv"
 
 	"github.com/film/violin/internal/auth"
 	"github.com/film/violin/internal/config"
 	"github.com/film/violin/internal/credentials"
 	"github.com/film/violin/internal/health"
 	"github.com/film/violin/internal/jobs"
+	"github.com/film/violin/internal/laya"
 )
 
 type request struct {
@@ -32,7 +35,24 @@ type response struct {
 
 func Run(in io.Reader, out io.Writer) error {
 	root := workerRoot()
-	defer jobs.InterruptOwned(root, os.Getpid())
+	localLaya, layaErr := laya.StartUpstream(context.Background(), root)
+	if layaErr != nil {
+		fmt.Fprintf(os.Stderr, "violin: upstream Laya Go runtime unavailable; using classifier fallback: %v\n", layaErr)
+	} else if localLaya != nil {
+		jobs.SetLocalLayaEngine(localLaya)
+		defer func() {
+			jobs.SetLocalLayaEngine(nil)
+			if err := localLaya.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "violin: stop upstream Laya runtime: %v\n", err)
+			}
+		}()
+	}
+	identity := make([]byte, 16)
+	if _, err := rand.Read(identity); err != nil {
+		return err
+	}
+	ownerInstance = fmt.Sprintf("%x", identity)
+	defer jobs.InterruptOwned(root, ownerInstance)
 	s := bufio.NewScanner(in)
 	enc := json.NewEncoder(out)
 	for s.Scan() {
@@ -71,15 +91,24 @@ func Run(in io.Reader, out io.Writer) error {
 	}
 	return s.Err()
 }
+
+var ownerInstance string
+
 func tools() map[string]any {
 	object := func(properties map[string]any, required []string) map[string]any {
 		return map[string]any{"type": "object", "properties": properties, "required": required, "additionalProperties": false}
 	}
 	return map[string]any{"tools": []map[string]any{
-		{"name": "spawn_agent", "description": "Delegate a bounded task to an external coding agent.", "inputSchema": object(map[string]any{"backend": map[string]any{"type": "string", "enum": []string{"auto", "agy", "qwen", "claude"}}, "task": map[string]any{"type": "string"}, "cwd": map[string]any{"type": "string"}, "mode": map[string]any{"type": "string", "enum": []string{"inspect", "implement"}}, "timeout_seconds": map[string]any{"type": "integer", "minimum": 1}, "idle_timeout_seconds": map[string]any{"type": "integer", "minimum": 1, "maximum": 3600}}, []string{"task", "cwd"})},
+		{"name": "spawn_agent", "description": "Delegate a bounded task to an external coding agent.", "inputSchema": object(map[string]any{"backend": map[string]any{"type": "string", "enum": []string{"auto", "agy", "qwen", "claude"}}, "task": map[string]any{"type": "string"}, "cwd": map[string]any{"type": "string"}, "mode": map[string]any{"type": "string", "enum": []string{"auto", "inspect", "implement"}}, "risk_reviewed": map[string]any{"type": "boolean"}, "timeout_seconds": map[string]any{"type": "integer", "minimum": 1}, "idle_timeout_seconds": map[string]any{"type": "integer", "minimum": 1, "maximum": 3600}}, []string{"task", "cwd"})},
 		{"name": "wait_agent", "description": "Wait on an existing agent.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}, "wait_seconds": map[string]any{"type": "integer", "minimum": 0, "maximum": 50}}, []string{"agent_id"})},
 		{"name": "list_agents", "description": "List agent jobs.", "inputSchema": object(map[string]any{}, nil)},
 		{"name": "interrupt_agent", "description": "Interrupt an agent without reverting work.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}}, []string{"agent_id"})},
+		{"name": "laya_route", "description": "Use the installed Laya model to recommend routing, timeout, risk, retry, and execution policy.", "inputSchema": object(map[string]any{"task": map[string]any{"type": "string"}, "cwd": map[string]any{"type": "string"}, "mode": map[string]any{"type": "string", "enum": []string{"auto", "inspect", "implement"}}, "backend": map[string]any{"type": "string", "enum": []string{"auto", "agy", "qwen", "claude"}}}, []string{"task"})},
+		{"name": "laya_review_risk", "description": "Review task risk before allowing an implementation, without changing files or spawning a worker.", "inputSchema": object(map[string]any{"task": map[string]any{"type": "string"}, "mode": map[string]any{"type": "string", "enum": []string{"inspect", "implement"}}}, []string{"task"})},
+		{"name": "laya_check_job", "description": "Inspect a Violin worker lifecycle state and supervisor evidence.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}}, []string{"agent_id"})},
+		{"name": "laya_wait_job", "description": "Wait for a Violin worker once and return its terminal or current supervisor state.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}, "wait_seconds": map[string]any{"type": "integer", "minimum": 0, "maximum": 50}}, []string{"agent_id"})},
+		{"name": "laya_explain_decision", "description": "Return the Laya decision and model metadata recorded for a worker.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}}, []string{"agent_id"})},
+		{"name": "laya_feedback", "description": "Record reviewed policy labels and outcome for a job without task text.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}, "backend": map[string]any{"type": "string", "enum": []string{"agy", "qwen", "claude"}}, "mode": map[string]any{"type": "string", "enum": []string{"inspect", "implement"}}, "risk": map[string]any{"type": "string", "enum": []string{"low", "medium", "high"}}, "timeout_policy": map[string]any{"type": "string", "enum": []string{"short", "standard", "long"}}, "retry_policy": map[string]any{"type": "string", "enum": []string{"never", "inspect_once"}}, "outcome": map[string]any{"type": "string", "enum": []string{"completed", "failed", "interrupted"}}}, []string{"agent_id", "backend", "mode", "risk", "timeout_policy", "retry_policy", "outcome"})},
 		{"name": "auth_status", "description": "Inspect global provider authentication without exposing credentials.", "inputSchema": object(map[string]any{}, nil)},
 		{"name": "health_status", "description": "Run configured provider health checks without exposing credentials.", "inputSchema": object(
 			map[string]any{"provider": map[string]any{"type": "string", "enum": []string{"qwen", "agy", "claude", "all"}}},
@@ -120,10 +149,34 @@ func call(params map[string]any) (any, error) {
 		task, _ := args["task"].(string)
 		backend, _ := args["backend"].(string)
 		mode, _ := args["mode"].(string)
-		timeout, timeoutSource := intArg(args, "timeout_seconds")
-		idle, _ := intArg(args, "idle_timeout_seconds")
-		job, err := jobs.Spawn(jobs.Options{Root: root, Workspace: cwd, Backend: backend, RequestedBackend: backend, Mode: mode, Task: task, Timeout: timeout, TimeoutSource: timeoutSource, IdleTimeout: idle})
+		timeout, timeoutSource, err := intArg(args, "timeout_seconds")
 		if err != nil {
+			return nil, err
+		}
+		if _, exists := args["timeout_seconds"]; exists && timeout < 1 {
+			return nil, errors.New("timeout_seconds must be positive")
+		}
+		idle, _, err := intArg(args, "idle_timeout_seconds")
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := args["idle_timeout_seconds"]; exists && (idle < 1 || idle > 3600) {
+			return nil, errors.New("idle_timeout_seconds must be between 1 and 3600")
+		}
+		riskReviewed := false
+		if raw, exists := args["risk_reviewed"]; exists {
+			var ok bool
+			riskReviewed, ok = raw.(bool)
+			if !ok {
+				return nil, errors.New("risk_reviewed must be a boolean")
+			}
+		}
+		job, err := jobs.Spawn(jobs.Options{Root: root, Workspace: cwd, Backend: backend, RequestedBackend: backend, Mode: mode, Task: task, Timeout: timeout, TimeoutSource: timeoutSource, IdleTimeout: idle, OwnerInstance: ownerInstance, RiskReviewed: riskReviewed})
+		if err != nil {
+			var review jobs.ReviewRequiredError
+			if errors.As(err, &review) {
+				return review.Result(), nil
+			}
 			if required, ok := err.(jobs.AuthRequiredError); ok {
 				return required.Details(), nil
 			}
@@ -131,12 +184,16 @@ func call(params map[string]any) (any, error) {
 		}
 		return job.Live(), nil
 	case "wait_agent":
+		seconds, err := waitArg(args)
+		if err != nil {
+			return nil, err
+		}
 		id, _ := args["agent_id"].(string)
 		job, err := jobs.Open(root, id)
 		if err != nil {
 			return nil, err
 		}
-		return job.Wait(50)
+		return job.Wait(seconds)
 	case "list_agents":
 		return jobs.List(root)
 	case "interrupt_agent":
@@ -146,9 +203,126 @@ func call(params map[string]any) (any, error) {
 			return nil, err
 		}
 		return job.Interrupt()
+	case "laya_route":
+		task, _ := args["task"].(string)
+		mode := stringArg(args, "mode", "inspect")
+		requested := stringArg(args, "backend", "auto")
+		workspace := stringArg(args, "cwd", "")
+		settings, err := config.LoadFor(workspace)
+		if err != nil {
+			return nil, err
+		}
+		return jobs.EvaluateLaya(root, task, mode, requested, settings), nil
+	case "laya_review_risk":
+		task, _ := args["task"].(string)
+		mode := stringArg(args, "mode", "implement")
+		settings, err := config.LoadFor("")
+		if err != nil {
+			return nil, err
+		}
+		result := jobs.EvaluateLaya(root, task, mode, "auto", settings)
+		if result.Decision == nil {
+			return result, nil
+		}
+		return map[string]any{"risk": result.Decision.Risk, "task_mode": result.Decision.TaskMode, "confidence": result.Decision.Confidence, "margin": result.Decision.Margin, "reason_codes": result.Decision.ReasonCodes, "model_version": result.ModelVersion, "fallback": result.Fallback, "decision": result.Decision}, nil
+	case "laya_check_job":
+		job, err := jobs.Open(root, stringArg(args, "agent_id", ""))
+		if err != nil {
+			return nil, err
+		}
+		return job.Live(), nil
+	case "laya_wait_job":
+		seconds, err := waitArg(args)
+		if err != nil {
+			return nil, err
+		}
+		job, err := jobs.Open(root, stringArg(args, "agent_id", ""))
+		if err != nil {
+			return nil, err
+		}
+		return job.Wait(seconds)
+	case "laya_explain_decision":
+		job, err := jobs.Open(root, stringArg(args, "agent_id", ""))
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"agent_id": job.Descriptor.AgentID, "laya_mode": job.Descriptor.LayaMode, "laya_fallback": job.Descriptor.LayaFallback, "laya_model_version": job.Descriptor.LayaModelVersion, "laya_error": job.Descriptor.LayaError, "laya_decision": job.Descriptor.LayaDecision}, nil
+	case "laya_feedback":
+		id := stringArg(args, "agent_id", "")
+		backend := stringArg(args, "backend", "")
+		mode := stringArg(args, "mode", "")
+		risk := stringArg(args, "risk", "")
+		timeoutPolicy := stringArg(args, "timeout_policy", "")
+		retryPolicy := stringArg(args, "retry_policy", "")
+		outcome := stringArg(args, "outcome", "")
+		if err := jobs.ValidateFeedbackID(id); err != nil {
+			return nil, err
+		}
+		knownJob, err := laya.FeedbackHasAgent(root, id)
+		if err != nil {
+			return nil, err
+		}
+		if !knownJob {
+			return nil, errors.New("feedback requires a completed known job")
+		}
+		if backend != "agy" && backend != "qwen" && backend != "claude" {
+			return nil, errors.New("invalid feedback backend")
+		}
+		if mode != "inspect" && mode != "implement" {
+			return nil, errors.New("invalid feedback mode")
+		}
+		if risk != "low" && risk != "medium" && risk != "high" {
+			return nil, errors.New("invalid feedback risk")
+		}
+		if timeoutPolicy != "short" && timeoutPolicy != "standard" && timeoutPolicy != "long" {
+			return nil, errors.New("invalid feedback timeout_policy")
+		}
+		if retryPolicy != "never" && retryPolicy != "inspect_once" {
+			return nil, errors.New("invalid feedback retry_policy")
+		}
+		if outcome != "completed" && outcome != "failed" && outcome != "interrupted" {
+			return nil, errors.New("invalid feedback outcome")
+		}
+		if err := laya.AppendFeedback(root, laya.FeedbackEvent{AgentID: id, CorrectedBackend: backend, CorrectedMode: mode, CorrectedRisk: laya.Risk(risk), CorrectedTimeout: timeoutPolicy, CorrectedRetry: retryPolicy, Corrected: true, Outcome: outcome}); err != nil {
+			return nil, err
+		}
+		return map[string]any{"status": "recorded", "agent_id": id}, nil
 	default:
 		return nil, fmt.Errorf("unknown tool %q", name)
 	}
+}
+
+func waitArg(args map[string]any) (int, error) {
+	value, ok := args["wait_seconds"]
+	if !ok {
+		return 50, nil
+	}
+	var n int
+	switch v := value.(type) {
+	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) || v != math.Trunc(v) || v < 0 {
+			return 0, errors.New("wait_seconds must be a nonnegative integer")
+		}
+		n = int(v)
+	case int:
+		if v < 0 {
+			return 0, errors.New("wait_seconds must be a nonnegative integer")
+		}
+		n = v
+	default:
+		return 0, errors.New("wait_seconds must be a nonnegative integer")
+	}
+	if n > 50 {
+		n = 50
+	}
+	return n, nil
+}
+
+func stringArg(args map[string]any, key, fallback string) string {
+	if value, ok := args[key].(string); ok && value != "" {
+		return value
+	}
+	return fallback
 }
 
 func workerRoot() string {
@@ -159,21 +333,22 @@ func workerRoot() string {
 	return filepath.Join(home, ".local", "state", "violin-workers")
 }
 
-func intArg(args map[string]any, key string) (int, string) {
+func intArg(args map[string]any, key string) (int, string, error) {
 	value, ok := args[key]
 	if !ok {
-		return 0, ""
+		return 0, "", nil
 	}
 	switch typed := value.(type) {
 	case float64:
-		return int(typed), "request"
-	case int:
-		return typed, "request"
-	case string:
-		parsed, err := strconv.Atoi(typed)
-		if err == nil {
-			return parsed, "request"
+		if math.IsNaN(typed) || math.IsInf(typed, 0) || typed != math.Trunc(typed) || typed < 0 || typed > float64(int(^uint(0)>>1)) {
+			return 0, "", fmt.Errorf("%s must be a nonnegative integer", key)
 		}
+		return int(typed), "request", nil
+	case int:
+		if typed < 0 {
+			return 0, "", fmt.Errorf("%s must be a nonnegative integer", key)
+		}
+		return typed, "request", nil
 	}
-	return 0, ""
+	return 0, "", fmt.Errorf("%s must be a nonnegative integer", key)
 }
