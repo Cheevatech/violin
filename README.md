@@ -56,6 +56,7 @@ The repository now contains a Go control-plane binary built with `make go-build`
 ./bin/violin mcp
 ./bin/violin install
 ./bin/violin run --backend auto -C /absolute/workspace --task-file /path/task
+./bin/violin resume AGENT_ID --timeout 1800
 ./bin/violin model status
 ./bin/violin model verify
 ./bin/violin model update --manifest /path/manifest.json --source-dir /path/model-bundle
@@ -132,8 +133,11 @@ and an evidence directory under `~/.local/state/violin-workers`. Full logs and
 the full result remain there when the summary is truncated. A completed worker
 still requires Codex to inspect evidence and relevant validation before accepting
 the task. Nonzero exits, missing results, backend errors, and timeouts fail the
-run. The report follows `schemas/worker-report.schema.json`. No automatic
-retry occurs, and a partial Qwen implementation is never retried on AGY.
+run. The report follows `schemas/worker-report.schema.json`. There is no
+automatic retry or backend fallback. Timed-out jobs remain listed with
+`resumable: true`; the supervisor inspects partial output and workspace changes
+before manually resuming the same backend and scope. Each resume is a new
+attempt linked to the original evidence.
 
 `~/.config/violin/config.toml` configures scheduler order, session and machine
 limits, backend transport/auth policy, backend limits, and executable paths.
@@ -143,8 +147,8 @@ The legacy `~/.config/violin-agents/config.toml` remains supported during
 migration, and `<workspace>/.violin/config.toml` can override non-secret project
 policy. `VIOLIN_CONFIG`, the
 `VIOLIN_*_MAX_CONCURRENCY` variables, `VIOLIN_BACKEND_ORDER`, and backend bin
-variables override the file. The CLI facade supports `run`, `list`, `wait`,
-`interrupt`, and `config show|validate`:
+variables override the file. The legacy Python CLI facade supports `run`,
+`list`, `wait`, `interrupt`, and `config show|validate`:
 
 ```bash
 violin-agent run --backend auto -C /absolute/workspace --task-file /path/task
@@ -238,9 +242,16 @@ model; there is no separate Laya MCP server.
 When a run stops, inspect `report.json`, `status.json`, `task.txt`,
 `output.json`, `stdout.log`, and `stderr.log` under the reported evidence path.
 `provider_error`, `idle_timeout`, `timeout`, and `interrupted` identify common
-failure causes. The descriptor persists the worker PID and lease so a new Go
-MCP process can recover jobs while the process is still alive; completed jobs
-are finalized from their report and their descriptor is cleaned up.
+failure causes. On `timeout` or `idle_timeout`, `wait_agent` returns a
+`resumable` report and `list_agents` keeps the job visible. The supervisor
+inspects the partial result and workspace diff, then calls `resume_agent` or
+`violin resume AGENT_ID`. The new attempt keeps the original backend and
+workspace, includes the original task and partial report as a checkpoint, and
+receives a fresh timeout budget (the previous timeout by default). Pass
+`timeout_seconds` or `--timeout` to choose a different budget. The original
+attempt remains in evidence and links to the new attempt. Resume never runs
+automatically. The descriptor persists the worker PID and lease so a new Go
+MCP process can recover jobs while the process is alive.
 
 Qwen currently reports zero usage through this gateway; that is missing metering,
 not proof of zero tokens. No percentage of Codex token savings is claimed.

@@ -55,6 +55,8 @@ func main() {
 		err = healthCommand(os.Args[2:])
 	case "run":
 		err = runCommand(os.Args[2:])
+	case "resume":
+		err = resumeCommand(os.Args[2:])
 	case "wait":
 		err = waitCommand(os.Args[2:])
 	case "list":
@@ -88,7 +90,7 @@ func workerCommand(args []string) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: violin {install|mcp|init|uninstall|skills|auth|health|run|wait|list|interrupt|config|model}")
+	fmt.Fprintln(os.Stderr, "usage: violin {install|mcp|init|uninstall|skills|auth|health|run|resume|wait|list|interrupt|config|model}")
 }
 
 func installRuntime() error {
@@ -279,6 +281,34 @@ func runCommand(args []string) error {
 		return err
 	}
 	job, err := jobs.Spawn(jobs.Options{Root: root(), Workspace: workspace, Backend: *backend, RequestedBackend: *backend, Mode: *mode, Task: content, Timeout: *timeout, IdleTimeout: *idle})
+	if err != nil {
+		return err
+	}
+	if *background {
+		return printJSON(job.Live())
+	}
+	report, err := job.Wait(0)
+	if err != nil {
+		return err
+	}
+	return printJSON(report)
+}
+
+func resumeCommand(args []string) error {
+	if len(args) == 0 || args[0] == "" || strings.HasPrefix(args[0], "-") {
+		return errors.New("resume requires agent id")
+	}
+	agentID := args[0]
+	fs := flag.NewFlagSet("resume", flag.ContinueOnError)
+	timeout := fs.Int("timeout", 0, "timeout seconds for the new attempt (defaults to the previous timeout)")
+	background := fs.Bool("background", false, "return without waiting")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("resume accepts one agent id")
+	}
+	job, err := jobs.Resume(root(), agentID, *timeout)
 	if err != nil {
 		return err
 	}

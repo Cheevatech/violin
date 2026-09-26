@@ -11,7 +11,7 @@ import (
 
 func TestToolsExposeEmbeddedLayaOperations(t *testing.T) {
 	value := tools()["tools"].([]map[string]any)
-	want := map[string]bool{"laya_route": false, "laya_review_risk": false, "laya_check_job": false, "laya_wait_job": false, "laya_explain_decision": false, "laya_feedback": false}
+	want := map[string]bool{"resume_agent": false, "laya_route": false, "laya_review_risk": false, "laya_check_job": false, "laya_wait_job": false, "laya_explain_decision": false, "laya_feedback": false}
 	for _, item := range value {
 		if name, ok := item["name"].(string); ok {
 			if _, exists := want[name]; exists {

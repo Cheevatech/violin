@@ -37,6 +37,15 @@ After completion, inspect the returned report, `status.json`, supervisor state,
 changed files, and evidence. A completed process is not proof that the task
 succeeded, and unrelated work must not be reverted.
 
+If `wait_agent` returns `status: "timeout"` or `"idle_timeout"` with
+`resumable: true`, treat the job as unfinished. Inspect its partial report and
+the current workspace diff before deciding what remains. The timed-out job
+stays visible in `list_agents`; do not silently spawn a duplicate. When the
+original authorization and scope still apply, call `resume_agent` with that
+job's ID. Resume keeps the same backend and workspace, carries forward the
+original task and partial report, and creates a linked attempt with a fresh
+timeout budget. The original evidence remains available.
+
 ## Review
 
 Review the Go MCP and job path end to end. Check public MCP names and schemas,

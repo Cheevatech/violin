@@ -88,8 +88,9 @@ func tools() map[string]any {
 	}
 	return map[string]any{"tools": []map[string]any{
 		{"name": "spawn_agent", "description": "Delegate a bounded task to an external coding agent.", "inputSchema": object(map[string]any{"backend": map[string]any{"type": "string", "enum": []string{"auto", "agy", "qwen", "claude"}}, "task": map[string]any{"type": "string"}, "cwd": map[string]any{"type": "string"}, "mode": map[string]any{"type": "string", "enum": []string{"auto", "inspect", "implement"}}, "risk_reviewed": map[string]any{"type": "boolean"}, "timeout_seconds": map[string]any{"type": "integer", "minimum": 1}, "idle_timeout_seconds": map[string]any{"type": "integer", "minimum": 1, "maximum": 3600}}, []string{"task", "cwd"})},
-		{"name": "wait_agent", "description": "Wait on an existing agent.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}, "wait_seconds": map[string]any{"type": "integer", "minimum": 0, "maximum": 50}}, []string{"agent_id"})},
-		{"name": "list_agents", "description": "List agent jobs.", "inputSchema": object(map[string]any{}, nil)},
+		{"name": "wait_agent", "description": "Wait on an existing agent. A timeout report includes resumable=true when a supervisor may inspect the partial work and resume it manually.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}, "wait_seconds": map[string]any{"type": "integer", "minimum": 0, "maximum": 50}}, []string{"agent_id"})},
+		{"name": "resume_agent", "description": "Resume a timed-out job after the supervisor inspects its partial report and workspace. Starts a new attempt with the same backend and scope; previous evidence remains available. An optional timeout_seconds overrides the previous attempt's timeout.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}, "timeout_seconds": map[string]any{"type": "integer", "minimum": 1}}, []string{"agent_id"})},
+		{"name": "list_agents", "description": "List running jobs and timed-out jobs that are available for supervisor inspection and manual resume.", "inputSchema": object(map[string]any{}, nil)},
 		{"name": "interrupt_agent", "description": "Interrupt an agent without reverting work.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}}, []string{"agent_id"})},
 		{"name": "laya_route", "description": "Use the installed Laya model to recommend routing, timeout, risk, retry, and execution policy.", "inputSchema": object(map[string]any{"task": map[string]any{"type": "string"}, "cwd": map[string]any{"type": "string"}, "mode": map[string]any{"type": "string", "enum": []string{"auto", "inspect", "implement"}}, "backend": map[string]any{"type": "string", "enum": []string{"auto", "agy", "qwen", "claude"}}}, []string{"task"})},
 		{"name": "laya_review_risk", "description": "Review task risk before allowing an implementation, without changing files or spawning a worker.", "inputSchema": object(map[string]any{"task": map[string]any{"type": "string"}, "mode": map[string]any{"type": "string", "enum": []string{"inspect", "implement"}}}, []string{"task"})},
@@ -182,6 +183,20 @@ func call(params map[string]any) (any, error) {
 			return nil, err
 		}
 		return job.Wait(seconds)
+	case "resume_agent":
+		id, _ := args["agent_id"].(string)
+		timeout, _, err := intArg(args, "timeout_seconds")
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := args["timeout_seconds"]; exists && timeout < 1 {
+			return nil, errors.New("timeout_seconds must be positive")
+		}
+		job, err := jobs.Resume(root, id, timeout)
+		if err != nil {
+			return nil, err
+		}
+		return job.Live(), nil
 	case "list_agents":
 		return jobs.List(root)
 	case "interrupt_agent":
@@ -218,7 +233,7 @@ func call(params map[string]any) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return job.Live(), nil
+		return job.Wait(0)
 	case "laya_wait_job":
 		seconds, err := waitArg(args)
 		if err != nil {

@@ -25,6 +25,7 @@ import (
 type Options struct {
 	Root, Workspace, Backend, RequestedBackend, Mode, Task string
 	OwnerInstance, SessionID                               string
+	ParentAgentID                                          string
 	RiskReviewed                                           bool
 	Timeout, IdleTimeout                                   int
 	TimeoutSource                                          string
@@ -36,6 +37,7 @@ type Descriptor struct {
 	PID              int            `json:"pid"`
 	Lease            string         `json:"lease"`
 	Evidence         string         `json:"evidence"`
+	Workspace        string         `json:"workspace"`
 	Output           string         `json:"output"`
 	Status           string         `json:"status"`
 	TaskFile         string         `json:"task_file"`
@@ -58,6 +60,12 @@ type Descriptor struct {
 	SupervisorState  string         `json:"supervisor_state"`
 	SupervisorStale  int            `json:"supervisor_stale_seconds"`
 	MaxAttempts      int            `json:"max_attempts"`
+	Attempt          int            `json:"attempt"`
+	ParentAgentID    string         `json:"resumed_from,omitempty"`
+	ResumedBy        string         `json:"resumed_by,omitempty"`
+	TerminalStatus   string         `json:"terminal_status,omitempty"`
+	Resumable        bool           `json:"resumable,omitempty"`
+	Finished         bool           `json:"finished,omitempty"`
 }
 type Job struct {
 	Descriptor Descriptor
@@ -283,7 +291,13 @@ func Spawn(o Options) (*Job, error) {
 	}
 	_ = stdout.Close()
 	_ = stderr.Close()
-	d := Descriptor{AgentID: fmt.Sprintf("%d-%d", time.Now().UnixNano(), cmd.Process.Pid), Backend: o.Backend, RequestedBackend: o.RequestedBackend, PID: cmd.Process.Pid, Lease: fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid()), Evidence: run, Output: outputPath, Status: statusPath, TaskFile: taskPath, Mode: o.Mode, Timeout: o.Timeout, TimeoutSource: o.TimeoutSource, IdleTimeout: o.IdleTimeout, IdleEnabled: config.IdleTimeoutEnabled(o.Backend, cfg.Backend[o.Backend]), OwnerPID: os.Getpid(), OwnerInstance: o.OwnerInstance, SessionID: sessionID(o), CreatedAt: time.Now(), LayaMode: layaMode, LayaFallback: decision.Fallback, LayaModelVersion: decision.ModelVersion, LayaError: decision.Error, LayaDecision: decision.Decision, RiskReviewed: o.RiskReviewed, SupervisorMode: cfg.Laya.Supervisor.Mode, SupervisorState: "starting", SupervisorStale: cfg.Laya.Supervisor.StaleSeconds, MaxAttempts: maxAttempts}
+	attempt := 1
+	if o.ParentAgentID != "" {
+		if previous, openErr := Open(o.Root, o.ParentAgentID); openErr == nil {
+			attempt = previous.Descriptor.Attempt + 1
+		}
+	}
+	d := Descriptor{AgentID: fmt.Sprintf("%d-%d", time.Now().UnixNano(), cmd.Process.Pid), Backend: o.Backend, RequestedBackend: o.RequestedBackend, PID: cmd.Process.Pid, Lease: fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid()), Evidence: run, Workspace: o.Workspace, Output: outputPath, Status: statusPath, TaskFile: taskPath, Mode: o.Mode, Timeout: o.Timeout, TimeoutSource: o.TimeoutSource, IdleTimeout: o.IdleTimeout, IdleEnabled: config.IdleTimeoutEnabled(o.Backend, cfg.Backend[o.Backend]), OwnerPID: os.Getpid(), OwnerInstance: o.OwnerInstance, SessionID: sessionID(o), CreatedAt: time.Now(), LayaMode: layaMode, LayaFallback: decision.Fallback, LayaModelVersion: decision.ModelVersion, LayaError: decision.Error, LayaDecision: decision.Decision, RiskReviewed: o.RiskReviewed, SupervisorMode: cfg.Laya.Supervisor.Mode, SupervisorState: "starting", SupervisorStale: cfg.Laya.Supervisor.StaleSeconds, MaxAttempts: maxAttempts, Attempt: attempt, ParentAgentID: o.ParentAgentID}
 	j := &Job{Descriptor: d, path: filepath.Join(o.Root, "jobs", d.AgentID+".json"), cmd: cmd}
 	if err = os.MkdirAll(filepath.Dir(j.path), 0700); err != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
@@ -454,7 +468,7 @@ func (j *Job) workerMatches() bool {
 }
 func (j *Job) Live() map[string]any {
 	observation := j.observe()
-	return map[string]any{"agent_id": j.Descriptor.AgentID, "status": "running", "selected_backend": j.Descriptor.Backend, "requested_backend": j.Descriptor.RequestedBackend, "evidence": j.Descriptor.Evidence, "effective_timeout_seconds": j.Descriptor.Timeout, "timeout_source": j.Descriptor.TimeoutSource, "max_attempts": j.Descriptor.MaxAttempts, "idle_timeout_seconds": j.Descriptor.IdleTimeout, "idle_timeout_enabled": j.Descriptor.IdleEnabled, "risk_reviewed": j.Descriptor.RiskReviewed, "laya_mode": j.Descriptor.LayaMode, "laya_fallback": j.Descriptor.LayaFallback, "laya_model_version": j.Descriptor.LayaModelVersion, "laya_decision": j.Descriptor.LayaDecision, "supervisor_mode": j.Descriptor.SupervisorMode, "supervisor_state": observation.State, "supervisor_action": observation.Action, "supervisor_reason": observation.Reason, "supervisor_updated_at": observation.UpdatedAt, "supervisor_last_event_at": observation.LastEvent, "supervisor_event_count": observation.EventCount}
+	return map[string]any{"agent_id": j.Descriptor.AgentID, "status": "running", "selected_backend": j.Descriptor.Backend, "requested_backend": j.Descriptor.RequestedBackend, "evidence": j.Descriptor.Evidence, "effective_timeout_seconds": j.Descriptor.Timeout, "timeout_source": j.Descriptor.TimeoutSource, "max_attempts": j.Descriptor.MaxAttempts, "attempt": j.Descriptor.Attempt, "resumed_from": j.Descriptor.ParentAgentID, "idle_timeout_seconds": j.Descriptor.IdleTimeout, "idle_timeout_enabled": j.Descriptor.IdleEnabled, "risk_reviewed": j.Descriptor.RiskReviewed, "laya_mode": j.Descriptor.LayaMode, "laya_fallback": j.Descriptor.LayaFallback, "laya_model_version": j.Descriptor.LayaModelVersion, "laya_decision": j.Descriptor.LayaDecision, "supervisor_mode": j.Descriptor.SupervisorMode, "supervisor_state": observation.State, "supervisor_action": observation.Action, "supervisor_reason": observation.Reason, "supervisor_updated_at": observation.UpdatedAt, "supervisor_last_event_at": observation.LastEvent, "supervisor_event_count": observation.EventCount}
 }
 
 func (j *Job) observe() supervisor.Observation {
@@ -492,6 +506,17 @@ func (j *Job) Wait(seconds int) (any, error) {
 	return j.finish()
 }
 func (j *Job) finish() (map[string]any, error) {
+	if j.Descriptor.Finished {
+		data, err := os.ReadFile(j.Descriptor.Output)
+		if err != nil {
+			return nil, err
+		}
+		value := map[string]any{}
+		if err := json.Unmarshal(data, &value); err != nil {
+			return nil, err
+		}
+		return value, nil
+	}
 	data, err := os.ReadFile(j.Descriptor.Output)
 	var value map[string]any
 	if err == nil {
@@ -515,6 +540,28 @@ func (j *Job) finish() (map[string]any, error) {
 	value["laya_decision"] = j.Descriptor.LayaDecision
 	value["risk_reviewed"] = j.Descriptor.RiskReviewed
 	value["max_attempts"] = j.Descriptor.MaxAttempts
+	value["attempt"] = j.Descriptor.Attempt
+	value["resumable"] = reportOutcome(value) == "timeout" || reportOutcome(value) == "idle_timeout"
+	if j.Descriptor.ParentAgentID != "" {
+		value["resumed_from"] = j.Descriptor.ParentAgentID
+	}
+	status := reportOutcome(value)
+	j.Descriptor.Finished = true
+	j.Descriptor.TerminalStatus = status
+	j.Descriptor.Resumable = value["resumable"] == true
+	if j.Descriptor.Resumable {
+		if err := writeJSONAtomic(j.Descriptor.Output, value); err != nil {
+			return nil, err
+		}
+		if err := writeJSONAtomic(filepath.Join(j.Descriptor.Evidence, "report.json"), value); err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		if err := j.save(); err != nil {
+			return nil, err
+		}
+	} else {
+		_ = os.Remove(j.path)
+	}
 	_ = laya.AppendFeedback(filepath.Dir(j.Descriptor.Evidence), laya.FeedbackEvent{
 		AgentID: j.Descriptor.AgentID, RequestedBackend: j.Descriptor.RequestedBackend, SelectedBackend: j.Descriptor.Backend,
 		Mode: j.Descriptor.Mode, LayaMode: j.Descriptor.LayaMode, ModelVersion: j.Descriptor.LayaModelVersion,
@@ -523,8 +570,141 @@ func (j *Job) finish() (map[string]any, error) {
 		Outcome: reportOutcome(value), DurationSeconds: reportDuration(value), TimeoutSeconds: j.Descriptor.Timeout,
 		ErrorClass: reportErrorClass(value),
 	})
-	_ = os.Remove(j.path)
 	return value, nil
+}
+
+func writeJSONAtomic(path string, value any) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// Resume starts a new attempt from a timed-out job after the supervisor has
+// inspected its evidence. The old attempt remains available for audit.
+func Resume(root, id string, timeout int) (*Job, error) {
+	if !validID.MatchString(id) {
+		return nil, errors.New("invalid job id")
+	}
+	lockDir := filepath.Join(root, "resume-locks")
+	if err := os.MkdirAll(lockDir, 0700); err != nil {
+		return nil, err
+	}
+	lock, err := os.OpenFile(filepath.Join(lockDir, id+".lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return nil, err
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+
+	previous, err := Open(root, id)
+	if err != nil {
+		return nil, err
+	}
+	if previous.alive() {
+		return nil, errors.New("job is still running and cannot be resumed")
+	}
+	report, err := previous.finish()
+	if err != nil {
+		return nil, err
+	}
+	if !previous.Descriptor.Resumable {
+		return nil, fmt.Errorf("job status %q is not resumable", reportOutcome(report))
+	}
+	if previous.Descriptor.ResumedBy != "" {
+		return nil, fmt.Errorf("job was already resumed as %s", previous.Descriptor.ResumedBy)
+	}
+	originalTask, err := os.ReadFile(previous.Descriptor.TaskFile)
+	if err != nil {
+		return nil, err
+	}
+	if timeout < 0 {
+		return nil, errors.New("timeout must be nonnegative")
+	}
+	if timeout == 0 {
+		timeout = previous.Descriptor.Timeout
+	}
+	timeoutSource := previous.Descriptor.TimeoutSource
+	if timeout != previous.Descriptor.Timeout {
+		timeoutSource = "resume:request"
+	}
+	resumeTask := buildResumeTask(id, string(originalTask), report)
+	resumed, err := Spawn(Options{
+		Root: root, Workspace: previous.Descriptor.Workspace,
+		Backend: previous.Descriptor.Backend, RequestedBackend: previous.Descriptor.RequestedBackend,
+		Mode: previous.Descriptor.Mode, Task: resumeTask, Timeout: timeout,
+		TimeoutSource: timeoutSource, IdleTimeout: previous.Descriptor.IdleTimeout,
+		SessionID: previous.Descriptor.SessionID, RiskReviewed: previous.Descriptor.RiskReviewed,
+		ParentAgentID: id,
+	})
+	if err != nil {
+		return nil, err
+	}
+	previous.Descriptor.ResumedBy = resumed.Descriptor.AgentID
+	previous.Descriptor.Resumable = false
+	if err := previous.save(); err != nil {
+		return resumed, err
+	}
+	for _, path := range []string{previous.Descriptor.Output, filepath.Join(previous.Descriptor.Evidence, "report.json")} {
+		if err := updateResumeLink(path, resumed.Descriptor.AgentID); err != nil {
+			return resumed, err
+		}
+	}
+	return resumed, nil
+}
+
+func buildResumeTask(id, task string, report map[string]any) string {
+	status := reportOutcome(report)
+	summary, _ := report["summary"].(string)
+	if len(summary) > 6000 {
+		summary = summary[:6000]
+	}
+	changed, _ := json.Marshal(report["changed_files"])
+	return fmt.Sprintf(`Resume the unfinished task from Violin job %s. The previous attempt ended with status %q and was not automatically restarted.
+
+Original task:
+%s
+
+Checkpoint from the previous attempt:
+- Evidence directory: %v
+- Files reported as changed: %s
+- Partial result summary:
+%s
+
+Inspect the current workspace and its diff before editing. Preserve valid work already done, continue only the unmet parts of the original task, and do not repeat completed external side effects. Keep the original scope and report what remains incomplete.`, id, status, task, report["evidence"], changed, summary)
+}
+
+func updateResumeLink(path, resumedBy string) error {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var value map[string]any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	value["resumable"] = false
+	value["resumed_by"] = resumedBy
+	updated, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, updated, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func decisionConfidence(decision *laya.Decision) float64 {
