@@ -97,4 +97,4 @@ jobs:
       - name: Publish assets for the tagged Violin release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --title "$GITHUB_REF_NAME" --notes "Pinned upstream Laya ONNX bundles and ONNX Runtime 1.29.0."
+        run: gh release create "$GITHUB_REF_NAME" release-assets/* --repo "$GITHUB_REPOSITORY" --verify-tag --title "$GITHUB_REF_NAME" --notes "Pinned upstream Laya ONNX bundles and ONNX Runtime 1.29.0."
