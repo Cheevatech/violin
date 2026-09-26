@@ -30,8 +30,8 @@ Use `mode: "auto"` only when Laya may choose inspect versus implement.
 For implementation work, use `laya_review_risk` before changing files. Give the
 worker explicit write scope and acceptance criteria. Use `laya_wait_job` rather
 than repeatedly polling; use `laya_check_job` only when an intermediate status
-is needed. The public MCP and job control are Go-owned; Python entrypoints are
-compatibility paths.
+is needed. The public MCP, job control, and Laya inference runtime are Go-owned;
+Python entrypoints are not part of the supported installation or runtime.
 
 After completion, inspect the returned report, `status.json`, supervisor state,
 changed files, and evidence. A completed process is not proof that the task

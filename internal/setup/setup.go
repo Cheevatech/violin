@@ -141,8 +141,8 @@ func ConfigPlan(apply bool) (Plan, error) {
 	return plan, nil
 }
 
-// LayaAdvisoryPlan safely lowers an existing active policy before the upstream
-// SDK is rolled out. The original config is backed up before replacement.
+// LayaAdvisoryPlan safely lowers an existing active policy before upstream
+// checkpoint parity and Violin holdout evaluation are complete.
 func LayaAdvisoryPlan(apply bool) (Plan, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -188,8 +188,7 @@ implement = 3600
 [laya]
 mode = "advisory"
 timeout_seconds = 10
-# violin install provisions the managed upstream Laya Python SDK runtime.
-# runner = ["your-laya-runtime"]
+# violin install provisions pinned upstream Laya ONNX checkpoints and the Go runtime.
 
 [laya.supervisor]
 mode = "shadow"

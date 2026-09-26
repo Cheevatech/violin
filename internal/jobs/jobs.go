@@ -957,12 +957,7 @@ func EvaluateLaya(root, task, mode, requested string, cfg config.Config) laya.Re
 	if err != nil {
 		return laya.Result{Fallback: true, Error: err.Error()}
 	}
-	modelPath, _ := manager.ActivePath()
-	runner := cfg.Laya.Runner
-	if len(runner) == 0 {
-		runner = laya.RunnerFromEnv()
-	}
-	engine := laya.ManagedEngine{Manager: manager, Runner: runner, ModelPath: modelPath, Timeout: time.Duration(cfg.Laya.TimeoutSeconds) * time.Second, Fallback: laya.FallbackEngine{}}
+	engine := laya.ManagedEngine{Manager: manager, Fallback: laya.FallbackEngine{}}
 	request := laya.Request{Language: laya.ProtocolLanguage, State: map[string]any{"task": task, "mode": mode}, Questions: []laya.Question{
 		{ID: "backend", Kind: laya.Choice, Prompt: "Which configured coding agent is best suited to this task?", Options: []string{"agy", "qwen", "claude"}, Fallback: requested},
 		{ID: "task_mode", Kind: laya.Choice, Prompt: "Does the task inspect or change files?", Options: []string{"inspect", "implement"}, Fallback: mode},
@@ -979,17 +974,33 @@ func EvaluateLaya(root, task, mode, requested string, cfg config.Config) laya.Re
 			if (mode == "inspect" || mode == "implement") && result.Decision != nil {
 				result.Decision.TaskMode = mode
 			}
+			applyLayaProviderSettings(&result, requested, cfg)
 			return result
 		}
 		fallback, _ := engine.Evaluate(request)
 		fallback.Fallback = true
-		fallback.Error = "upstream Laya runner failed: " + localErr.Error()
+		fallback.Error = "upstream Laya ONNX inference failed; Go classifier fallback is in use: " + localErr.Error()
+		applyLayaProviderSettings(&fallback, requested, cfg)
 		return fallback
 	}
 	result, _ := engine.Evaluate(request)
 	result.Fallback = true
 	if result.Error == "" {
-		result.Error = "upstream Laya SDK runner is not running; classifier fallback is in use"
+		result.Error = "upstream Laya ONNX runtime is not available; Go classifier fallback is in use"
 	}
+	applyLayaProviderSettings(&result, requested, cfg)
 	return result
+}
+
+func applyLayaProviderSettings(result *laya.Result, requested string, cfg config.Config) {
+	if result == nil || result.Decision == nil {
+		return
+	}
+	backend := requested
+	if backend == "" || backend == "auto" {
+		if len(result.Decision.BackendCandidates) > 0 {
+			backend = result.Decision.BackendCandidates[0]
+		}
+	}
+	result.Decision.IdleTimeoutEnabled = config.IdleTimeoutEnabled(backend, cfg.Backend[backend])
 }
