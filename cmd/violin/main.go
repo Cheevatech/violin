@@ -94,10 +94,13 @@ func usage() {
 }
 
 func installRuntime() error {
+	if _, err := setup.LayaAdvisoryPlan(true); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	if err := laya.EnsureDefaultModel(root()); err != nil {
 		return err
 	}
-	if err := laya.EnsureLocalLLM(context.Background(), root()); err != nil {
+	if err := laya.EnsureUpstream(context.Background(), root()); err != nil {
 		return err
 	}
 	if _, err := setup.ConfigPlan(true); err != nil && !strings.Contains(err.Error(), "already exists") {
@@ -107,7 +110,7 @@ func installRuntime() error {
 	if err != nil {
 		return err
 	}
-	return printJSON(map[string]any{"action": "install", "model": laya.LocalModelVersion, "local_llm": laya.GetLocalLLMStatus(root()), "classifier_fallback": laya.DefaultModelVersion, "mcp": plan})
+	return printJSON(map[string]any{"action": "install", "upstream_laya": laya.UpstreamRuntimeStatus(root()), "classifier_fallback": laya.DefaultModelVersion, "mcp": plan})
 }
 
 func healthCommand(args []string) error {
@@ -416,7 +419,7 @@ func modelCommand(args []string) error {
 	}
 	switch args[0] {
 	case "status":
-		return printJSON(map[string]any{"classifier": m.Status(), "local_llm": laya.GetLocalLLMStatus(root())})
+		return printJSON(map[string]any{"classifier": m.Status(), "upstream_laya": laya.UpstreamRuntimeStatus(root())})
 	case "verify":
 		return m.Verify()
 	case "rollback":

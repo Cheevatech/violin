@@ -59,11 +59,39 @@ func TestConfigPlanCreatesCredentialFreeTemplate(t *testing.T) {
 	if string(data) == "" || containsCredentialMarker(string(data)) {
 		t.Fatalf("unsafe config template: %s", data)
 	}
-	if !strings.Contains(string(data), "[laya]\nmode = \"active\"") {
-		t.Fatalf("new installs must enable guarded Laya mode: %s", data)
+	if !strings.Contains(string(data), "[laya]\nmode = \"advisory\"") {
+		t.Fatalf("new installs must keep Laya advisory: %s", data)
 	}
 	if _, err := ConfigPlan(true); err == nil {
 		t.Fatal("expected existing config refusal")
+	}
+}
+
+func TestLayaAdvisoryPlanBacksUpActiveConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	target := filepath.Join(home, ".config", "violin", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
+		t.Fatal(err)
+	}
+	original := "[laya]\nmode = \"active\"\ntimeout_seconds = 10\n"
+	if err := os.WriteFile(target, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := LayaAdvisoryPlan(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Backup == "" {
+		t.Fatal("expected backup path")
+	}
+	backup, err := os.ReadFile(plan.Backup)
+	if err != nil || string(backup) != original {
+		t.Fatalf("backup=%q err=%v", backup, err)
+	}
+	updated, err := os.ReadFile(target)
+	if err != nil || !strings.Contains(string(updated), "mode = \"advisory\"") {
+		t.Fatalf("config=%q err=%v", updated, err)
 	}
 }
 
