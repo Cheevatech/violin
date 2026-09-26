@@ -2,10 +2,14 @@ package mcp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"github.com/film/violin/internal/laya"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -132,6 +136,54 @@ func TestRunServesLayaToolsThroughMCPProtocol(t *testing.T) {
 	}
 	if !bytes.Contains(output.Bytes(), []byte(`"laya_route"`)) {
 		t.Fatalf("MCP tools/list missing Laya route: %s", output.String())
+	}
+}
+
+func TestRealUpstreamLayaThroughMCP(t *testing.T) {
+	assets := os.Getenv("VIOLIN_LAYA_TEST_BUNDLE_ASSETS")
+	if assets == "" {
+		t.Skip("set VIOLIN_LAYA_TEST_BUNDLE_ASSETS to a packaged ONNX bundle")
+	}
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.toml")
+	if err := os.WriteFile(configPath, []byte("[laya]\nmode = \"advisory\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VIOLIN_CONFIG", configPath)
+	t.Setenv("VIOLIN_WORKER_RUNS", filepath.Join(root, "runs"))
+	server := httptest.NewServer(http.FileServer(http.Dir(assets)))
+	defer server.Close()
+	t.Setenv("VIOLIN_LAYA_BUNDLE_BASE_URL", server.URL)
+	if err := laya.EnsureUpstream(context.Background(), filepath.Join(root, "runs")); err != nil {
+		t.Fatalf("install bundle: %v", err)
+	}
+
+	input := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"laya_route","arguments":{"task":"Please inspect this Go change","mode":"inspect","backend":"auto"}}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"laya_route","arguments":{"task":"ช่วยตรวจการเปลี่ยนแปลง Go นี้","mode":"inspect","backend":"auto"}}}`,
+	}, "\n") + "\n"
+	var output bytes.Buffer
+	if err := Run(strings.NewReader(input), &output); err != nil {
+		t.Fatal(err)
+	}
+	decoder := json.NewDecoder(&output)
+	for _, want := range []string{"typed-decisions", "multilingual"} {
+		var envelope response
+		if err := decoder.Decode(&envelope); err != nil {
+			t.Fatal(err)
+		}
+		result, ok := envelope.Result.(map[string]any)
+		if !ok {
+			t.Fatalf("MCP result=%#v", envelope.Result)
+		}
+		content := result["content"].([]any)[0].(map[string]any)
+		var route laya.Result
+		if err := json.Unmarshal([]byte(content["text"].(string)), &route); err != nil {
+			t.Fatal(err)
+		}
+		if route.Fallback || route.Decision == nil || !strings.Contains(route.ModelVersion, "/"+want+"@") {
+			t.Fatalf("MCP route expected real %s result, got %+v", want, route)
+		}
 	}
 }
 

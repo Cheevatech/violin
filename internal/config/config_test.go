@@ -58,9 +58,8 @@ func TestIdleTimeoutPolicyCanDeclareBuiltInCLI(t *testing.T) {
 
 func TestLayaConfigEnvironmentOverridesAreValidated(t *testing.T) {
 	t.Setenv("VIOLIN_LAYA_MODE", "advisory")
-	t.Setenv("VIOLIN_LAYA_RUNNER", `["laya-runtime"]`)
 	settings, err := loadFiles([]string{})
-	if err != nil || settings.Laya.Mode != "advisory" || len(settings.Laya.Runner) != 1 {
+	if err != nil || settings.Laya.Mode != "advisory" {
 		t.Fatalf("settings=%+v err=%v", settings.Laya, err)
 	}
 	t.Setenv("VIOLIN_LAYA_MODE", "unsafe")

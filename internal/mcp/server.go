@@ -35,6 +35,18 @@ type response struct {
 
 func Run(in io.Reader, out io.Writer) error {
 	root := workerRoot()
+	localLaya, layaErr := laya.StartUpstream(context.Background(), root)
+	if layaErr != nil {
+		fmt.Fprintf(os.Stderr, "violin: upstream Laya Go runtime unavailable; using classifier fallback: %v\n", layaErr)
+	} else if localLaya != nil {
+		jobs.SetLocalLayaEngine(localLaya)
+		defer func() {
+			jobs.SetLocalLayaEngine(nil)
+			if err := localLaya.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "violin: stop upstream Laya runtime: %v\n", err)
+			}
+		}()
+	}
 	identity := make([]byte, 16)
 	if _, err := rand.Read(identity); err != nil {
 		return err

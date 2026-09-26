@@ -141,6 +141,33 @@ func ConfigPlan(apply bool) (Plan, error) {
 	return plan, nil
 }
 
+// LayaAdvisoryPlan safely lowers an existing active policy before upstream
+// checkpoint parity and Violin holdout evaluation are complete.
+func LayaAdvisoryPlan(apply bool) (Plan, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return Plan{}, err
+	}
+	target := filepath.Join(home, ".config", "violin", "config.toml")
+	original, err := os.ReadFile(target)
+	if err != nil {
+		return Plan{}, err
+	}
+	updated := strings.Replace(string(original), "[laya]\nmode = \"active\"", "[laya]\nmode = \"advisory\"", 1)
+	if updated == string(original) {
+		return Plan{Action: "laya_advisory", Target: target, Apply: apply, Changes: "no active Laya policy found"}, nil
+	}
+	plan := Plan{Action: "laya_advisory", Target: target, Apply: apply, Changes: diffSummary(string(original), updated)}
+	if !apply {
+		return plan, nil
+	}
+	backup, err := writeBackupAndAtomic(target, []byte(updated))
+	if err != nil {
+		return Plan{}, err
+	}
+	plan.Backup = backup
+	return plan, nil
+}
 const configTemplate = configStart + `
 # Public policy only. Keep API keys in environment variables or the OS keychain.
 
@@ -158,11 +185,10 @@ inspect = 900
 implement = 3600
 
 [laya]
-mode = "shadow"
+mode = "advisory"
 timeout_seconds = 10
 # The Go binary includes the Laya inference engine. The install command installs
-# the verified English model; runner is only for development adapters.
-# runner = ["your-laya-runtime"]
+# violin install provisions pinned upstream Laya ONNX checkpoints and the Go runtime.
 
 [laya.supervisor]
 mode = "shadow"

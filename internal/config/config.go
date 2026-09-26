@@ -49,7 +49,6 @@ type Scheduler struct {
 
 type Laya struct {
 	Mode           string     `toml:"mode" json:"mode"`
-	Runner         []string   `toml:"runner" json:"runner,omitempty"`
 	TimeoutSeconds int        `toml:"timeout_seconds" json:"timeout_seconds"`
 	Supervisor     Supervisor `toml:"supervisor" json:"supervisor"`
 }
@@ -135,12 +134,6 @@ func loadFiles(paths []string) (Config, error) {
 	}
 	if value := os.Getenv("VIOLIN_LAYA_MODE"); value != "" {
 		c.Laya.Mode = value
-	}
-	if value := os.Getenv("VIOLIN_LAYA_RUNNER"); value != "" {
-		var runner []string
-		if json.Unmarshal([]byte(value), &runner) == nil {
-			c.Laya.Runner = runner
-		}
 	}
 	if value := os.Getenv("VIOLIN_LAYA_TIMEOUT_SECONDS"); value != "" {
 		c.Laya.TimeoutSeconds = atoi(value, c.Laya.TimeoutSeconds)

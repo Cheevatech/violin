@@ -1,0 +1,100 @@
+name: Build upstream Laya bundles
+
+on:
+  push:
+    tags:
+      - "laya-upstream-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: arm64
+            runner: macos-14
+            ort_asset: onnxruntime-osx-arm64-1.29.0.tgz
+            ort_sha256: d0706fc34f315d8c88639d0a8c81f2e09e815f282cabed3493c06a054352cf92
+            ort_dir: onnxruntime-osx-arm64-1.29.0
+          - goos: linux
+            goarch: amd64
+            runner: ubuntu-24.04
+            ort_asset: onnxruntime-linux-x64-1.29.0.tgz
+            ort_sha256: c3fddc4f139a045b0c4902c57410f0694f1c2fdf9b6939fbe38b1aeae7cd14ba
+            ort_dir: onnxruntime-linux-x64-1.29.0
+          - goos: linux
+            goarch: arm64
+            runner: ubuntu-24.04-arm
+            ort_asset: onnxruntime-linux-aarch64-1.29.0.tgz
+            ort_sha256: e1799098ebc054b370f6176a450f158720f297818c613e5dc99b92e2ec82346f
+            ort_dir: onnxruntime-linux-aarch64-1.29.0
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Stage pinned ONNX exports
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/laya-stage"
+          mkdir -p "$stage/checkpoints/typed-decisions/tokenizer" "$stage/checkpoints/multilingual/tokenizer" "$stage/runtime"
+          base="https://huggingface.co/codenamev/laya-onnx/resolve/1bc2622b5a4e4ceb46aadf709d7a360eb7d3d1f4"
+          for variant in typed-decisions multilingual; do
+            target="$stage/checkpoints/$variant"
+            curl -fL --retry 3 "$base/$variant/model.onnx" -o "$target/laya.onnx"
+            curl -fL --retry 3 "$base/$variant/rl_agent_config.json" -o "$target/rl_agent_config.json"
+            curl -fL --retry 3 "$base/$variant/tokenizer/tokenizer.json" -o "$target/tokenizer/tokenizer.json"
+            curl -fL --retry 3 "$base/$variant/tokenizer/tokenizer_config.json" -o "$target/tokenizer/tokenizer_config.json"
+          done
+          shasum -a 256 -c <<EOF
+          7bc0662f05f69635291b1f823a946931b9936fcebd2ea98db85da70ebb8f4ba2  $stage/checkpoints/typed-decisions/laya.onnx
+          da6a0f87380597f679b12ce539e0a187e923fcffcf8dfc2f035728388dceacb0  $stage/checkpoints/multilingual/laya.onnx
+          ebf0cd524d92342a6be5e48e9fca3d7c2babfb5a56ccd79d2171ef5d8c7f7be8  $stage/checkpoints/typed-decisions/rl_agent_config.json
+          25061739243b617ad88d1219ba6f8a9c86c5881ca28df024fa2d9b3b2fcc30c6  $stage/checkpoints/multilingual/rl_agent_config.json
+          6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30  $stage/checkpoints/typed-decisions/tokenizer/tokenizer.json
+          609d8f4c067cd3950f88594c5a802616cea245823836ef5848ee4fc40aab5b6f  $stage/checkpoints/multilingual/tokenizer/tokenizer.json
+          08d4cf3ac4dca381759441b85b91a6d40e688471dcd33d15d6649eb0a9a854d1  $stage/checkpoints/typed-decisions/tokenizer/tokenizer_config.json
+          6c6b2d8e3c84ce0e671c129cd6b374b235d6f9863042a5836358d00a89bbb5a1  $stage/checkpoints/multilingual/tokenizer/tokenizer_config.json
+          EOF
+          ort="$RUNNER_TEMP/${{ matrix.ort_asset }}"
+          curl -fL --retry 3 "https://github.com/microsoft/onnxruntime/releases/download/v1.29.0/${{ matrix.ort_asset }}" -o "$ort"
+          echo "${{ matrix.ort_sha256 }}  $ort" | shasum -a 256 -c -
+          tar -xzf "$ort" -C "$RUNNER_TEMP"
+          if [[ "${{ matrix.goos }}" == darwin ]]; then
+            cp "$RUNNER_TEMP/${{ matrix.ort_dir }}/lib/libonnxruntime.dylib" "$stage/runtime/libonnxruntime.dylib"
+          else
+            cp "$RUNNER_TEMP/${{ matrix.ort_dir }}/lib/libonnxruntime.so" "$stage/runtime/libonnxruntime.so"
+          fi
+          go run ./cmd/laya-bundle -root "$stage" -out "$RUNNER_TEMP/laya-release" -goos "${{ matrix.goos }}" -goarch "${{ matrix.goarch }}"
+          VIOLIN_LAYA_TEST_BUNDLE_ASSETS="$RUNNER_TEMP/laya-release" go test ./internal/mcp -run TestRealUpstreamLayaThroughMCP -count=1 -v
+      - uses: actions/upload-artifact@v4
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        with:
+          name: laya-checkpoints
+          path: ${{ runner.temp }}/laya-release/laya-*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: laya-platform-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            ${{ runner.temp }}/laya-release/manifest-${{ matrix.goos }}-${{ matrix.goarch }}.json
+            ${{ runner.temp }}/laya-release/onnxruntime-${{ matrix.goos }}-${{ matrix.goarch }}-*
+          if-no-files-found: error
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Publish assets for the tagged Violin release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --title "$GITHUB_REF_NAME" --notes "Pinned upstream Laya ONNX bundles and ONNX Runtime 1.29.0."

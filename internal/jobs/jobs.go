@@ -399,6 +399,17 @@ func Open(root, id string) (*Job, error) {
 
 var validID = regexp.MustCompile(`^[0-9]+-[1-9][0-9]*$`)
 
+var localLayaEngine struct {
+	sync.RWMutex
+	engine laya.Engine
+}
+
+func SetLocalLayaEngine(engine laya.Engine) {
+	localLayaEngine.Lock()
+	localLayaEngine.engine = engine
+	localLayaEngine.Unlock()
+}
+
 func ValidateFeedbackID(id string) error {
 	if !validID.MatchString(id) {
 		return errors.New("invalid agent id")
@@ -765,12 +776,50 @@ func EvaluateLaya(root, task, mode, requested string, cfg config.Config) laya.Re
 	if err != nil {
 		return laya.Result{Fallback: true, Error: err.Error()}
 	}
-	modelPath, _ := manager.ActivePath()
-	runner := cfg.Laya.Runner
-	if len(runner) == 0 {
-		runner = laya.RunnerFromEnv()
+	engine := laya.ManagedEngine{Manager: manager, Fallback: laya.FallbackEngine{}}
+	request := laya.Request{Language: laya.ProtocolLanguage, State: map[string]any{"task": task, "mode": mode}, Questions: []laya.Question{
+		{ID: "backend", Kind: laya.Choice, Prompt: "Which configured coding agent is best suited to this task?", Options: []string{"agy", "qwen", "claude"}, Fallback: requested},
+		{ID: "task_mode", Kind: laya.Choice, Prompt: "Does the task inspect or change files?", Options: []string{"inspect", "implement"}, Fallback: mode},
+		{ID: "risk", Kind: laya.Choice, Prompt: "What is the task's operational risk?", Options: []string{"low", "medium", "high"}, Fallback: "medium"},
+		{ID: "timeout_policy", Kind: laya.Choice, Prompt: "What timeout class fits the task?", Options: []string{"short", "standard", "long"}, Fallback: "standard"},
+		{ID: "retry_policy", Kind: laya.Choice, Prompt: "Should one retry be allowed?", Options: []string{"no_retry", "retry_once"}, Fallback: "no_retry"},
+	}}
+	localLayaEngine.RLock()
+	local := localLayaEngine.engine
+	localLayaEngine.RUnlock()
+	if local != nil {
+		result, localErr := local.Evaluate(request)
+		if localErr == nil {
+			if (mode == "inspect" || mode == "implement") && result.Decision != nil {
+				result.Decision.TaskMode = mode
+			}
+			applyLayaProviderSettings(&result, requested, cfg)
+			return result
+		}
+		fallback, _ := engine.Evaluate(request)
+		fallback.Fallback = true
+		fallback.Error = "upstream Laya ONNX inference failed; Go classifier fallback is in use: " + localErr.Error()
+		applyLayaProviderSettings(&fallback, requested, cfg)
+		return fallback
 	}
-	engine := laya.ManagedEngine{Manager: manager, Runner: runner, ModelPath: modelPath, Timeout: time.Duration(cfg.Laya.TimeoutSeconds) * time.Second, Fallback: laya.FallbackEngine{}}
-	result, _ := engine.Evaluate(laya.Request{Language: laya.ProtocolLanguage, State: map[string]any{"task": task, "mode": mode}, Questions: []laya.Question{{ID: "backend", Kind: laya.Choice, Options: []string{"agy", "qwen", "claude"}, Fallback: requested}}})
+	result, _ := engine.Evaluate(request)
+	result.Fallback = true
+	if result.Error == "" {
+		result.Error = "upstream Laya ONNX runtime is not available; Go classifier fallback is in use"
+	}
+	applyLayaProviderSettings(&result, requested, cfg)
 	return result
+}
+
+func applyLayaProviderSettings(result *laya.Result, requested string, cfg config.Config) {
+	if result == nil || result.Decision == nil {
+		return
+	}
+	backend := requested
+	if backend == "" || backend == "auto" {
+		if len(result.Decision.BackendCandidates) > 0 {
+			backend = result.Decision.BackendCandidates[0]
+		}
+	}
+	result.Decision.IdleTimeoutEnabled = config.IdleTimeoutEnabled(backend, cfg.Backend[backend])
 }
