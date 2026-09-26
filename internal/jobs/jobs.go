@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -412,6 +413,17 @@ func Open(root, id string) (*Job, error) {
 }
 
 var validID = regexp.MustCompile(`^[0-9]+-[1-9][0-9]*$`)
+
+var localLayaEngine struct {
+	sync.RWMutex
+	engine laya.Engine
+}
+
+func SetLocalLayaEngine(engine laya.Engine) {
+	localLayaEngine.Lock()
+	localLayaEngine.engine = engine
+	localLayaEngine.Unlock()
+}
 
 func ValidateFeedbackID(id string) error {
 	if !validID.MatchString(id) {
@@ -951,6 +963,24 @@ func EvaluateLaya(root, task, mode, requested string, cfg config.Config) laya.Re
 		runner = laya.RunnerFromEnv()
 	}
 	engine := laya.ManagedEngine{Manager: manager, Runner: runner, ModelPath: modelPath, Timeout: time.Duration(cfg.Laya.TimeoutSeconds) * time.Second, Fallback: laya.FallbackEngine{}}
-	result, _ := engine.Evaluate(laya.Request{Language: laya.ProtocolLanguage, State: map[string]any{"task": task, "mode": mode}, Questions: []laya.Question{{ID: "backend", Kind: laya.Choice, Options: []string{"agy", "qwen", "claude"}, Fallback: requested}}})
+	request := laya.Request{Language: laya.ProtocolLanguage, State: map[string]any{"task": task, "mode": mode}, Questions: []laya.Question{{ID: "backend", Kind: laya.Choice, Options: []string{"agy", "qwen", "claude"}, Fallback: requested}}}
+	localLayaEngine.RLock()
+	local := localLayaEngine.engine
+	localLayaEngine.RUnlock()
+	if local != nil {
+		result, localErr := local.Evaluate(request)
+		if localErr == nil {
+			return result
+		}
+		fallback, _ := engine.Evaluate(request)
+		fallback.Fallback = true
+		fallback.Error = "local Laya LLM failed: " + localErr.Error()
+		return fallback
+	}
+	result, _ := engine.Evaluate(request)
+	result.Fallback = true
+	if result.Error == "" {
+		result.Error = "local Laya LLM is not running; classifier fallback is in use"
+	}
 	return result
 }
