@@ -36,6 +36,14 @@ type Plan struct {
 }
 
 func MCPPlan(binary string, apply bool) (Plan, error) {
+	if strings.TrimSpace(binary) == "" {
+		return Plan{}, errors.New("Violin MCP binary path is empty")
+	}
+	absBinary, err := filepath.Abs(binary)
+	if err != nil {
+		return Plan{}, fmt.Errorf("resolve Violin MCP binary path: %w", err)
+	}
+	binary = absBinary
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return Plan{}, err
@@ -45,7 +53,7 @@ func MCPPlan(binary string, apply bool) (Plan, error) {
 	if err != nil && !os.IsNotExist(err) {
 		return Plan{}, err
 	}
-	updated, err := replaceManagedBlock(string(original), fmt.Sprintf("%s\n[mcp_servers.violin]\ncommand = %q\ntool_timeout_sec = 60\n%s", startMarker, binary, endMarker))
+	updated, err := replaceManagedBlock(string(original), fmt.Sprintf("%s\n[mcp_servers.violin]\ncommand = %q\nargs = [\"mcp\"]\ntool_timeout_sec = 60\ndefault_tools_approval_mode = \"approve\"\n%s", startMarker, binary, endMarker))
 	if err != nil {
 		return Plan{}, err
 	}
@@ -199,26 +207,41 @@ max_extensions = 2
 max_retries = 1
 
 # Configure one or more providers explicitly. Examples:
+# Qwen Code CLI example (the common model setting is passed through {model}):
 # [backend.qwen]
-# transport = "cli"
-# [backend.qwen.cli]
-# command = ["your-qwen-cli", "--task-file", "{task_file}"]
-# status_command = ["your-qwen-cli", "auth", "status"]
-# login_command = ["your-qwen-cli", "auth", "login"]
+# model = "qwen3.8-27b"
+# auth = "cli"
+# command = ["qwen", "--safe-mode", "--auth-type", "openai", "--model", "{model}", "--approval-mode", "{approval_mode}", "--max-wall-time", "{timeout}", "--output-format", "stream-json", "--append-system-prompt", "Follow applicable AGENTS.md and CLAUDE.md instructions."]
+# protocol = "qwen"
+# stdin = true
+# idle_timeout_enabled = false
+# health_command = ["violin-health"]
 #
 # [backend.agy]
+# model = "gemini-3.8-flash-medium"
+# auth = "api_key"
+# api_key_env = "VIOLIN_AGY_API_KEY"
 # transport = "api"
 # [backend.agy.api]
 # base_url = "https://generativelanguage.googleapis.com"
-# model = "gemini-2.5-flash"
-# api_key_env = "VIOLIN_AGY_API_KEY"
 #
 # [backend.claude]
+# model = "claude-sonnet-5"
+# auth = "cli"
 # transport = "cli"
 # [backend.claude.cli]
-# command = ["claude", "--print", "{task}"]
+# command = ["claude", "--print", "--model", "{model}", "{task}"]
 # status_command = ["claude", "auth", "status", "--json"]
 # login_command = ["claude", "auth", "login"]
+#
+# [backend.codex]
+# model = "gpt-6-luna"
+# auth = "cli"
+# transport = "cli"
+# [backend.codex.cli]
+# command = ["codex", "exec", "--json", "--model", "{model}", "--sandbox", "{sandbox}", "-C", "{workspace}", "-"]
+# status_command = ["codex", "login", "status"]
+# login_command = ["codex", "login"]
 ` + configEnd + "\n"
 
 func SkillsPlan(sourceDir string, apply bool) (Plan, error) {

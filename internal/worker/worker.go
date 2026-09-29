@@ -24,7 +24,7 @@ import (
 )
 
 type Options struct {
-	Backend, Mode, Workspace, TaskFile          string
+	Backend, Mode, Workspace, TaskFile, Model   string
 	Timeout, IdleTimeout, MaxAttempts, Attempts int
 	IdleTimeoutEnabled                          bool
 	HeartbeatSeconds                            int
@@ -93,6 +93,7 @@ func Run(ctx context.Context, options Options) error {
 		return err
 	}
 	backend := settings.Backend[options.Backend]
+	options.Model = backend.EffectiveModel()
 	options.baseline = gitFiles(options.Workspace)
 	options.baselineDigest = workspaceDigest(options.Workspace)
 	options.HeartbeatSeconds = settings.Laya.Supervisor.HeartbeatSeconds
@@ -108,6 +109,10 @@ func Run(ctx context.Context, options Options) error {
 	cliCommand := backend.CLI.Command
 	if len(cliCommand) == 0 {
 		cliCommand = commandParts(backend.Command)
+	}
+	usesAPI := backend.Transport == "api" || (backend.Transport == "auto" && len(cliCommand) == 0)
+	if options.Model != "" && !usesAPI && !commandHasPlaceholder(cliCommand, "model") {
+		return writeFailure(options, started, errors.New("backend model is configured but CLI command must include the {model} placeholder"))
 	}
 	options.IdleTimeoutEnabled = config.IdleTimeoutEnabled(options.Backend, backend)
 	var text string
@@ -223,6 +228,16 @@ func commandParts(value any) []string {
 	}
 }
 
+func commandHasPlaceholder(command []string, name string) bool {
+	want := "{" + name + "}"
+	for _, arg := range command {
+		if strings.Contains(arg, want) {
+			return true
+		}
+	}
+	return false
+}
+
 func runCLI(parent context.Context, command []string, task string, options Options) (string, error) {
 	if len(command) == 0 {
 		return "", errors.New("CLI transport is not configured")
@@ -231,7 +246,7 @@ func runCLI(parent context.Context, command []string, task string, options Optio
 	if started.IsZero() {
 		started = time.Now()
 	}
-	values := map[string]string{"workspace": options.Workspace, "task": task, "task_file": options.TaskFile, "mode": options.Mode, "timeout": fmt.Sprint(options.Timeout)}
+	values := map[string]string{"workspace": options.Workspace, "task": task, "task_file": options.TaskFile, "mode": options.Mode, "approval_mode": cliApprovalMode(options.Backend, options.Mode), "sandbox": cliSandbox(options.Mode), "timeout": fmt.Sprint(options.Timeout), "model": options.Model}
 	argv := make([]string, len(command))
 	for i, value := range command {
 		for key, replacement := range values {
@@ -346,6 +361,27 @@ func runCLI(parent context.Context, command []string, task string, options Optio
 		return "", executionError{status: "provider_error", err: fmt.Errorf("%s: %w", argv[0], waitErr)}
 	}
 	return parseProviderOutput(bytes.TrimSpace(append(output, errorOutput...)), options.Backend)
+}
+
+func cliApprovalMode(backend, mode string) string {
+	if backend != "qwen" {
+		return mode
+	}
+	switch mode {
+	case "inspect":
+		return "plan"
+	case "implement", "auto":
+		return "auto"
+	default:
+		return mode
+	}
+}
+
+func cliSandbox(mode string) string {
+	if mode == "implement" {
+		return "workspace-write"
+	}
+	return "read-only"
 }
 
 func stopCLI(cmd *exec.Cmd, wait <-chan error) {
@@ -496,7 +532,11 @@ func writeReport(options Options, started time.Time, status string, exitCode int
 	if options.Attempts < 1 {
 		options.Attempts = 1
 	}
-	report := map[string]any{"status": status, "backend": options.Backend, "exit_code": exitCode, "attempts": options.Attempts, "max_attempts": options.MaxAttempts, "duration_seconds": time.Since(started).Seconds(), "evidence": run, "phase": status, "metadata_status": "not_applicable", "smoke_status": "not_applicable", "final_message_seen": strings.TrimSpace(text) != "", "changed_files": changed, "git_diff_check": diffCheck, "effective_timeout_seconds": options.Timeout, "timeout_source": timeoutSource(options), "idle_timeout_seconds": idleTimeout, "idle_timeout_enabled": idleEnabled, "summary": summary, "summary_truncated": len(text) > summaryLimit, "supervisor_review_required": true, "usage": usage}
+	modelStatus := "unknown"
+	if options.Model != "" {
+		modelStatus = "configured"
+	}
+	report := map[string]any{"status": status, "backend": options.Backend, "requested_model": options.Model, "actual_model": "unknown", "model_status": modelStatus, "exit_code": exitCode, "attempts": options.Attempts, "max_attempts": options.MaxAttempts, "duration_seconds": time.Since(started).Seconds(), "evidence": run, "phase": status, "metadata_status": "not_applicable", "smoke_status": "not_applicable", "final_message_seen": strings.TrimSpace(text) != "", "changed_files": changed, "git_diff_check": diffCheck, "effective_timeout_seconds": options.Timeout, "timeout_source": timeoutSource(options), "idle_timeout_seconds": idleTimeout, "idle_timeout_enabled": idleEnabled, "summary": summary, "summary_truncated": len(text) > summaryLimit, "supervisor_review_required": true, "usage": usage}
 	if errorMessage != "" {
 		report["error_message"] = errorMessage
 	}

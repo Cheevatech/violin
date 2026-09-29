@@ -41,6 +41,40 @@ func TestRemoveManagedBlockPreservesSurroundingConfig(t *testing.T) {
 	}
 }
 
+func TestMCPPlanInstallsViolinToolsWithApproveMode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	target := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("model = \"keep-me\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := MCPPlan("/tmp/violin", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Backup == "" {
+		t.Fatal("expected config backup")
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"model = \"keep-me\"",
+		"[mcp_servers.violin]",
+		"default_tools_approval_mode = \"approve\"",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("installed config missing %q:\n%s", want, text)
+		}
+	}
+}
+
 func TestConfigPlanCreatesCredentialFreeTemplate(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

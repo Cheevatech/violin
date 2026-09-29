@@ -26,28 +26,29 @@ func FromConfig(ctx context.Context, settings config.Config, store credentials.S
 }
 
 func FromConfigProvider(ctx context.Context, settings config.Config, store credentials.Store, name string) (Provider, error) {
-	qwen := settings.Backend["qwen"].API
-	agy := settings.Backend["agy"].API
-	claude := settings.Backend["claude"].API
+	qwenBackend := settings.Backend["qwen"]
+	agyBackend := settings.Backend["agy"]
+	claudeBackend := settings.Backend["claude"]
+	qwen, agy, claude := qwenBackend.API, agyBackend.API, claudeBackend.API
 	switch name {
 	case "qwen":
-		key, err := lookupAPIKey(ctx, store, name, qwen.APIKeyEnv)
+		key, err := lookupAPIKey(ctx, store, name, qwenBackend.EffectiveAPIKeyEnv())
 		if err != nil {
 			return nil, err
 		}
-		return NewQwenWithWireAPI(qwen.BaseURL, key, envOrValue(qwen.Model, "qwen"), qwen.WireAPI), nil
+		return NewQwenWithWireAPI(qwen.BaseURL, key, envOrValue(qwenBackend.EffectiveModel(), "qwen"), qwen.WireAPI), nil
 	case "agy":
-		key, err := lookupAPIKey(ctx, store, name, agy.APIKeyEnv)
+		key, err := lookupAPIKey(ctx, store, name, agyBackend.EffectiveAPIKeyEnv())
 		if err != nil {
 			return nil, err
 		}
-		return NewAGY(envOrValue(agy.BaseURL, "https://generativelanguage.googleapis.com"), key, envOrValue(agy.Model, "gemini-2.5-flash")), nil
+		return NewAGY(envOrValue(agy.BaseURL, "https://generativelanguage.googleapis.com"), key, envOrValue(agyBackend.EffectiveModel(), "gemini-2.5-flash")), nil
 	case "claude":
-		key, err := lookupAPIKey(ctx, store, name, claude.APIKeyEnv)
+		key, err := lookupAPIKey(ctx, store, name, claudeBackend.EffectiveAPIKeyEnv())
 		if err != nil {
 			return nil, err
 		}
-		return NewClaude(envOrValue(claude.BaseURL, "https://api.anthropic.com"), key, envOrValue(claude.Model, "claude-sonnet-4-5")), nil
+		return NewClaude(envOrValue(claude.BaseURL, "https://api.anthropic.com"), key, envOrValue(claudeBackend.EffectiveModel(), "claude-sonnet-4-5")), nil
 	default:
 		return nil, fmt.Errorf("unknown provider %q", name)
 	}

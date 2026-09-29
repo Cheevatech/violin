@@ -201,7 +201,6 @@ func (m *nativeModel) Predict(state string, questions []Question) ([]Answer, str
 		return nil, m.device, err
 	}
 	items := make([]sequenceItem, len(questions))
-	maxOptions, maxLen := 0, 0
 	for index, q := range questions {
 		if q.Kind != Choice || len(q.Options) < 2 {
 			return nil, m.device, fmt.Errorf("Laya ONNX currently requires choice questions with at least two options (%s)", q.ID)
@@ -211,6 +210,21 @@ func (m *nativeModel) Predict(state string, questions []Question) ([]Answer, str
 			return nil, m.device, buildErr
 		}
 		items[index] = item
+	}
+	return m.predictSequenceItems(items, questions, 0)
+}
+
+// predictSequenceItems runs pre-tokenized Laya sequences while the caller owns m.mu.
+// temperatureOverride is used only for parity references captured at T=1.
+func (m *nativeModel) predictSequenceItems(items []sequenceItem, questions []Question, temperatureOverride float64) ([]Answer, string, error) {
+	if len(items) != len(questions) {
+		return nil, m.device, errors.New("Laya sequence and question counts do not match")
+	}
+	maxOptions, maxLen := 0, 0
+	for index, item := range items {
+		if questions[index].Kind != Choice || len(questions[index].Options) < 2 || len(item.markers) != len(questions[index].Options) {
+			return nil, m.device, fmt.Errorf("Laya ONNX sequence does not match a choice question (%s)", questions[index].ID)
+		}
 		if len(item.markers) > maxOptions {
 			maxOptions = len(item.markers)
 		}
@@ -291,6 +305,9 @@ func (m *nativeModel) Predict(state string, questions []Question) ([]Answer, str
 	for row, q := range questions {
 		k := len(items[row].markers)
 		temperature := m.temperature(k)
+		if temperatureOverride > 0 {
+			temperature = temperatureOverride
+		}
 		maxLogit := float64(logitData[row*maxOptions]) / temperature
 		for col := 1; col < k; col++ {
 			value := float64(logitData[row*maxOptions+col]) / temperature
@@ -305,18 +322,30 @@ func (m *nativeModel) Predict(state string, questions []Question) ([]Answer, str
 			total += exp[col]
 		}
 		probabilities := make(map[string]float64, k)
+		rawProbabilities := make(map[string]float64, k)
 		best := 0
 		for col, value := range exp {
-			p := math.Round(value/total*10000) / 10000
-			probabilities[q.Options[col]] = p
+			rawProbability := value / total
+			rawProbabilities[q.Options[col]] = rawProbability
+			probabilities[q.Options[col]] = math.Round(rawProbability*10000) / 10000
 			if value > exp[best] {
 				best = col
 			}
 		}
-		confidence := probabilityConfidence(probabilities)
+		confidence := probabilityConfidence(rawProbabilities)
 		answers[row] = Answer{ID: q.ID, Kind: q.Kind, Value: q.Options[best], Probabilities: probabilities, Confidence: confidence}
 	}
 	return answers, m.device, nil
+}
+
+func (m *nativeModel) predictPreparedSequence(ids, markers []int, question Question, temperature float64) (Answer, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	answers, _, err := m.predictSequenceItems([]sequenceItem{{ids: ids, markers: markers}}, []Question{question}, temperature)
+	if err != nil {
+		return Answer{}, err
+	}
+	return answers[0], nil
 }
 
 func questionTypeID(kind Kind) int {
@@ -352,7 +381,8 @@ func (m *nativeModel) buildSequence(stateIDs []int, q Question) (sequenceItem, e
 	options := make([][]int, len(q.Options))
 	optionTokenCount := 0
 	for i, option := range q.Options {
-		encoded, encodeErr := m.encode(" " + strings.ReplaceAll(option, mask, " "))
+		optionText := strings.ReplaceAll(questionOptionText(q, option), mask, " ")
+		encoded, encodeErr := m.encode(" " + optionText)
 		if encodeErr != nil {
 			return sequenceItem{}, encodeErr
 		}
@@ -408,6 +438,13 @@ func (m *nativeModel) buildSequence(stateIDs []int, q Question) (sequenceItem, e
 		return sequenceItem{}, errors.New("Laya options exceeded the checkpoint head token limit")
 	}
 	return sequenceItem{ids: ids, markers: validMarkers}, nil
+}
+
+func questionOptionText(question Question, option string) string {
+	if description := question.OptionDescriptions[option]; description != "" {
+		return option + ": " + description
+	}
+	return option
 }
 
 func (m *nativeModel) temperature(optionCount int) float64 {

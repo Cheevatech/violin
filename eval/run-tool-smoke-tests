@@ -13,13 +13,8 @@ printf '%s\n' "$bridge_output" | grep -Fq '"ok": true'
 printf '%s\n' "$bridge_output" | grep -Fq '"tool": "get_symbols_overview"'
 
 printf '%s\n' '[qwen preflight]'
-qwen_output=$(/Users/film/.codex/skills/loop-engineer/scripts/run-with-timeout.sh 60 \
-  /Users/film/bin/violin-codex-qwen smoke 2>&1)
-printf '%s\n' "$qwen_output" | grep -Fq 'QWEN_SMOKE_OK'
-printf '%s\n' "$qwen_output" | grep -Eq 'qwen3\.8-27b|Qwen 3\.8 27B'
-printf '%s\n' "$qwen_output" | grep -Fq 'violin_lan'
-if printf '%s\n' "$qwen_output" | grep -Fq 'unsupported call'; then
-  exit 1
-fi
+qwen_output=$(/Users/film/Documents/looping-engineer/compat/python/bin/violin-health 2>&1)
+printf '%s\n' "$qwen_output" | grep -Fq '"status": "ready"'
+printf '%s\n' "$qwen_output" | grep -Fq '"interface": "qwen-code-cli"'
 
 printf '%s\n' 'Qwen tool smoke tests passed.'

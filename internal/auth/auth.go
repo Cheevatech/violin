@@ -42,6 +42,8 @@ func (m Manager) Status(ctx context.Context, provider string) (ProviderStatus, e
 		return m.cliStatus(ctx, "claude", "claude", "auth", "status", "--json")
 	case "qwen":
 		return m.cliStatus(ctx, "qwen", "codex", "login", "status")
+	case "codex":
+		return m.cliStatus(ctx, "codex", "codex", "login", "status")
 	case "agy":
 		if _, err := m.Store.Lookup(ctx, "VIOLIN_AGY_API_KEY", "violin/agy"); err == nil {
 			return ProviderStatus{Provider: "agy", Authenticated: true, Source: "environment_or_keychain"}, nil
@@ -57,16 +59,19 @@ func (m Manager) StatusWithBackend(ctx context.Context, provider string, backend
 	if transport == "" {
 		transport = "auto"
 	}
-	if transport == "api" {
+	if backend.Auth == "api_key" {
 		return m.apiStatus(ctx, provider, backend)
 	}
 	if len(backend.CLI.StatusCommand) > 0 {
 		return m.cliStatusArgs(ctx, provider, backend.CLI.StatusCommand)
 	}
-	if transport == "cli" {
+	if backend.Auth == "cli" || transport == "cli" {
 		return ProviderStatus{Provider: provider, Source: "cli", Action: "configure", Message: "configure backend.cli.status_command"}, nil
 	}
-	if backend.API.BaseURL != "" || backend.API.APIKeyEnv != "" {
+	if transport == "api" {
+		return m.apiStatus(ctx, provider, backend)
+	}
+	if backend.API.BaseURL != "" || backend.EffectiveAPIKeyEnv() != "" {
 		return m.apiStatus(ctx, provider, backend)
 	}
 	return ProviderStatus{Provider: provider, Source: "unconfigured", Action: "configure", Message: "configure backend.transport and CLI or API settings"}, nil
@@ -76,7 +81,7 @@ func (m Manager) apiStatus(ctx context.Context, provider string, backend config.
 	if strings.TrimSpace(backend.API.BaseURL) == "" {
 		return ProviderStatus{Provider: provider, Source: "api", Action: "configure", Message: "configure backend.api.base_url"}, nil
 	}
-	envName := backend.API.APIKeyEnv
+	envName := backend.EffectiveAPIKeyEnv()
 	if envName == "" {
 		envName = "VIOLIN_" + strings.ToUpper(provider) + "_API_KEY"
 	}
@@ -88,7 +93,7 @@ func (m Manager) apiStatus(ctx context.Context, provider string, backend config.
 
 func (m Manager) AllStatus(ctx context.Context) (map[string]ProviderStatus, error) {
 	result := make(map[string]ProviderStatus, 3)
-	for _, provider := range []string{"qwen", "agy", "claude"} {
+	for _, provider := range []string{"qwen", "agy", "claude", "codex"} {
 		status, err := m.Status(ctx, provider)
 		if err != nil {
 			return nil, err
@@ -100,7 +105,7 @@ func (m Manager) AllStatus(ctx context.Context) (map[string]ProviderStatus, erro
 
 func (m Manager) AllStatusWithConfig(ctx context.Context, settings config.Config) (map[string]ProviderStatus, error) {
 	result := make(map[string]ProviderStatus, len(settings.Backend))
-	for _, provider := range []string{"qwen", "agy", "claude"} {
+	for _, provider := range []string{"qwen", "agy", "claude", "codex"} {
 		status, err := m.StatusWithBackend(ctx, provider, settings.Backend[provider])
 		if err != nil {
 			return nil, err
@@ -115,6 +120,8 @@ func (m Manager) Login(ctx context.Context, provider string) error {
 	case "claude":
 		return m.interactive(ctx, "claude", "auth", "login")
 	case "qwen":
+		return m.interactive(ctx, "codex", "login")
+	case "codex":
 		return m.interactive(ctx, "codex", "login")
 	case "agy":
 		return errors.New("agy has no login subcommand; configure VIOLIN_AGY_API_KEY or OS keychain service violin/agy")

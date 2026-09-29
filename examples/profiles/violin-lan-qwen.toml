@@ -1,12 +1,21 @@
-# Opt-in compatibility profile for the original self-hosted Qwen route.
-# Do not use this as a public default. Set VIOLIN_LLMUX_API_KEY through the
-# environment or the existing OS keychain entry before using it.
+# Opt-in profile for Qwen Code CLI and the OpenAI-compatible provider already
+# configured in ~/.qwen/settings.json. Credentials stay in Qwen Code's existing
+# configuration and are not copied into Violin config or process arguments.
 
 [backend.qwen]
-transport = "cli"
+model = "qwen3.8-27b"
+auth = "cli"
+command = [
+  "qwen",
+  "--safe-mode",
+  "--auth-type", "openai",
+  "--model", "{model}",
+  "--approval-mode", "{approval_mode}",
+  "--max-wall-time", "{timeout}",
+  "--output-format", "stream-json",
+  "--append-system-prompt",
+  "Before acting, read and follow applicable AGENTS.md and CLAUDE.md instructions. In inspect mode, do not modify files. In implement mode, change only the requested scope and report the files changed and checks run. Use only the current workspace.",
+]
+protocol = "qwen"
 idle_timeout_enabled = false
-
-[backend.qwen.cli]
-command = ["codex", "-c", "model=\"qwen3.8-27b\"", "-c", "model_provider=\"violin_lan\""]
-status_command = ["codex", "login", "status"]
-login_command = ["codex", "login"]
+health_command = ["violin-health"]

@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"github.com/film/violin/internal/laya"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/film/violin/internal/laya"
 )
 
 func TestToolsExposeEmbeddedLayaOperations(t *testing.T) {
@@ -106,6 +107,43 @@ func TestLayaRouteUsesFallbackWithoutSpawningWorker(t *testing.T) {
 	}
 }
 
+func TestSpawnAgentReportsQwenHealthFallbackThroughMCP(t *testing.T) {
+	root := t.TempDir()
+	workerRuns := filepath.Join(root, "runs")
+	workspace := filepath.Join(root, "workspace")
+	if err := os.Mkdir(workspace, 0700); err != nil {
+		t.Fatal(err)
+	}
+	worker := filepath.Join(root, "violin-worker")
+	if err := os.WriteFile(worker, []byte("#!/bin/sh\nsleep 30\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	healthCommand := filepath.Join(root, "qwen-health")
+	if err := os.WriteFile(healthCommand, []byte("#!/bin/sh\nprintf '{\\\"status\\\":\\\"qwen_unhealthy\\\"}\\n'\nexit 79\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "config.toml")
+	config := "[laya]\nmode = \"shadow\"\n[scheduler]\norder = [\"qwen\", \"agy\"]\n[backend.qwen]\ncommand = [\"qwen\"]\nprotocol = \"qwen\"\nhealth_command = [\"" + healthCommand + "\"]\n"
+	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VIOLIN_CONFIG", configPath)
+	t.Setenv("VIOLIN_WORKER_RUNS", workerRuns)
+	t.Setenv("VIOLIN_WORKER_BIN", worker)
+	t.Setenv("VIOLIN_LAYA_MODE", "shadow")
+	result, err := call(map[string]any{"name": "spawn_agent", "arguments": map[string]any{"task": "inspect this repository", "cwd": workspace, "mode": "inspect", "backend": "auto"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, ok := result.(map[string]any)
+	if !ok || value["selected_backend"] != "agy" || value["fallback_reason"] != "qwen_health_qwen_unhealthy" || value["health_status"] != "qwen_unhealthy" {
+		t.Fatalf("MCP spawn response omitted Qwen fallback evidence: %#v", result)
+	}
+	if _, err := call(map[string]any{"name": "interrupt_agent", "arguments": map[string]any{"agent_id": value["agent_id"]}}); err != nil {
+		t.Fatalf("failed to stop test worker: %v", err)
+	}
+}
+
 func TestLayaReviewRiskIsReadOnly(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config.toml")
@@ -121,6 +159,9 @@ func TestLayaReviewRiskIsReadOnly(t *testing.T) {
 	value, ok := result.(map[string]any)
 	if !ok || value["risk"] == nil || value["decision"] == nil {
 		t.Fatalf("unexpected risk result=%#v", result)
+	}
+	if risk, ok := value["risk"].(laya.Risk); !ok || risk != laya.RiskMedium || value["fallback"] != true {
+		t.Fatalf("fallback risk=%#v fallback=%#v, want medium and marked fallback", value["risk"], value["fallback"])
 	}
 	if _, err := os.Stat(filepath.Join(root, "runs", "jobs")); !os.IsNotExist(err) {
 		t.Fatalf("risk review must not create worker jobs: %v", err)

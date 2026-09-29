@@ -52,7 +52,8 @@ jobs:
             curl -fL --retry 3 "$base/$variant/tokenizer/tokenizer.json" -o "$target/tokenizer/tokenizer.json"
             curl -fL --retry 3 "$base/$variant/tokenizer/tokenizer_config.json" -o "$target/tokenizer/tokenizer_config.json"
           done
-          shasum -a 256 -c <<EOF
+          checks="$RUNNER_TEMP/laya-checksums.txt"
+          cat > "$checks" <<EOF
           7bc0662f05f69635291b1f823a946931b9936fcebd2ea98db85da70ebb8f4ba2  $stage/checkpoints/typed-decisions/laya.onnx
           da6a0f87380597f679b12ce539e0a187e923fcffcf8dfc2f035728388dceacb0  $stage/checkpoints/multilingual/laya.onnx
           ebf0cd524d92342a6be5e48e9fca3d7c2babfb5a56ccd79d2171ef5d8c7f7be8  $stage/checkpoints/typed-decisions/rl_agent_config.json
@@ -62,6 +63,8 @@ jobs:
           08d4cf3ac4dca381759441b85b91a6d40e688471dcd33d15d6649eb0a9a854d1  $stage/checkpoints/typed-decisions/tokenizer/tokenizer_config.json
           6c6b2d8e3c84ce0e671c129cd6b374b235d6f9863042a5836358d00a89bbb5a1  $stage/checkpoints/multilingual/tokenizer/tokenizer_config.json
           EOF
+          awk 'NF != 2 || length($1) != 64 || $1 !~ /^[0-9a-f]+$/ { bad = 1 } END { if (NR != 8) bad = 1; exit bad }' "$checks"
+          shasum -a 256 -c "$checks"
           ort="$RUNNER_TEMP/${{ matrix.ort_asset }}"
           curl -fL --retry 3 "https://github.com/microsoft/onnxruntime/releases/download/v1.29.0/${{ matrix.ort_asset }}" -o "$ort"
           echo "${{ matrix.ort_sha256 }}  $ort" | shasum -a 256 -c -
@@ -72,6 +75,7 @@ jobs:
             cp "$RUNNER_TEMP/${{ matrix.ort_dir }}/lib/libonnxruntime.so" "$stage/runtime/libonnxruntime.so"
           fi
           go run ./cmd/laya-bundle -root "$stage" -out "$RUNNER_TEMP/laya-release" -goos "${{ matrix.goos }}" -goarch "${{ matrix.goarch }}"
+          VIOLIN_LAYA_TEST_BUNDLE_ASSETS="$RUNNER_TEMP/laya-release" go test ./internal/laya -run TestRealUpstreamInferenceSmoke -count=1 -v
           VIOLIN_LAYA_TEST_BUNDLE_ASSETS="$RUNNER_TEMP/laya-release" go test ./internal/mcp -run TestRealUpstreamLayaThroughMCP -count=1 -v
       - uses: actions/upload-artifact@v4
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'

@@ -24,6 +24,10 @@ class InstallTests(unittest.TestCase):
                 module['main']()
             self.assertEqual(first, (config.read_text(), guidance.read_text()))
             self.assertEqual(tomllib.loads(first[0])['model'], 'existing-model')
+            self.assertEqual(
+                tomllib.loads(first[0])['mcp_servers']['violin']['default_tools_approval_mode'],
+                'approve',
+            )
             self.assertTrue(first[1].startswith('Existing guidance\n'))
             self.assertTrue((home/'bin/violin-worker').is_symlink())
             self.assertTrue((home/'bin/violin-agent').is_symlink())

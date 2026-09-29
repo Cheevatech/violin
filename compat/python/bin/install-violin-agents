@@ -42,6 +42,7 @@ def main():
     block = f'''{START}
 [mcp_servers.violin]
 command = {json.dumps(str(go_binary))}
+args = ["mcp"]
 tool_timeout_sec = 60
 default_tools_approval_mode = "approve"
 {END}'''
@@ -51,7 +52,7 @@ default_tools_approval_mode = "approve"
 ## External delegation (all workspaces and task types)
 
 When useful independent work warrants delegation, use `violin.spawn_agent`
-with backend `qwen` (self-hosted), `agy` (Gemini 3.8 Flash), or `claude` (Claude Code); prefer these over
+with backend `qwen` (Qwen Code CLI), `agy` (Gemini 3.8 Flash), or `claude` (Claude Code); prefer these over
 built-in collaboration agents to avoid OpenAI child-token spend. This instruction
 authorizes delegation of the user's task, not unrelated actions. Codex remains
 the supervisor: decide scope, acceptance criteria, review evidence, and own the
@@ -72,12 +73,9 @@ a completed process is not acceptance. Report the selected backend and any
 capacity fallback. Do not silently retry failed work or fall back to paid
 OpenAI children. Reassess the failure and give a bounded correction.
 
-Before declaring Qwen unavailable, run
-`{home}/bin/violin-qwen-metadata`. The official
-Codex model cache may omit custom `qwen3.8-27b`; that is expected when the
-effective `violin_lan` Responses configuration is valid. Accept the checker's
-`codex_debug_models` or `launcher_config` source and do not reject Qwen solely
-because the cache lacks the custom model entry.
+Qwen runs through the `qwen` executable and uses the provider credentials in
+`~/.qwen/settings.json`. Check availability with `{home}/bin/violin-health`;
+that command makes a bounded inference request and validates the final reply.
 
 If this MCP is unavailable in an existing session, use
 `{home}/bin/violin-agent run --backend auto -C /absolute/workspace --task-file /path/task`
@@ -90,9 +88,9 @@ claim native routing. Never copy the entire parent conversation into a worker.
     new_guidance = replace_block(old_guidance, policy)
     # Validate every destination before changing any global file.
     links = [(home / 'bin' / name, ROOT / 'compat/python/bin' / name)
-             for name in ['violin-worker', 'violin_scheduler.py', 'violin-health', 'violin-qwen-metadata']]
+             for name in ['violin-worker', 'violin_scheduler.py', 'violin-health']]
     links += [(home / 'bin' / name, ROOT / 'bin' / name)
-              for name in ['violin-codex-qwen', 'violin-claude', 'qwen-mode', 'qwen-verify-gate']]
+              for name in ['violin-claude', 'qwen-mode', 'qwen-verify-gate']]
     if go_binary.exists():
         links.append((home / 'bin' / 'violin', go_binary))
         links.append((home / 'bin' / 'violin-agent', go_binary))

@@ -2,13 +2,272 @@ package jobs
 
 import (
 	"encoding/json"
-	"github.com/film/violin/internal/laya"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/film/violin/internal/config"
+	"github.com/film/violin/internal/credentials"
+	"github.com/film/violin/internal/laya"
 )
+
+type confidentLowRiskEngine struct{}
+
+func (confidentLowRiskEngine) Evaluate(laya.Request) (laya.Result, error) {
+	return laya.Result{
+		ModelVersion: "test-low-risk",
+		Decision: &laya.Decision{
+			BackendCandidates: []string{"agy"}, TaskMode: "implement", Risk: laya.RiskLow,
+			TimeoutHintSeconds: 900, IdleTimeoutEnabled: true, Retry: laya.RetryHint{MaxAttempts: 1},
+			ExecutionTarget: laya.ExecutionExternal, CostTier: laya.TierMedium, LatencyTier: laya.TierMedium,
+			Confidence: .99, Margin: .9, HeadConfidence: map[string]float64{"risk": .99, "task_mode": .99},
+			HeadMargin: map[string]float64{"risk": .9, "task_mode": .9}, ModelVersion: "test-low-risk",
+		},
+	}, nil
+}
+
+func TestActiveLayaRequiresReviewForRiskyOperationsEvenWhenModelSaysLow(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	if err := os.Mkdir(workspace, 0700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "config.toml")
+	if err := os.WriteFile(configPath, []byte("[laya]\nmode = \"active\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VIOLIN_CONFIG", configPath)
+	t.Setenv("VIOLIN_WORKER_RUNS", filepath.Join(root, "runs"))
+	t.Setenv("VIOLIN_LAYA_MODE", "")
+	SetLocalLayaEngine(confidentLowRiskEngine{})
+	t.Cleanup(func() { SetLocalLayaEngine(nil) })
+
+	cases := []struct {
+		name string
+		task string
+		mode string
+	}{
+		{"delete production database", "Delete every customer record in the production database now; this is irreversible and there is no backup.", "implement"},
+		{"rotate live signing keys", "Rotate the live production signing keys immediately and invalidate all existing sessions.", "implement"},
+		{"production authentication deploy", "Deploy the new authentication middleware to production and disable the old access checks.", "implement"},
+		{"production database migration", "Migrate the production payments database and drop the legacy table as part of the same change.", "implement"},
+		{"revoke production credentials", "Revoke the exposed production API credentials and force every customer integration to re-authenticate.", "implement"},
+		{"publish cryptographic change", "Publish the package release that changes cryptographic verification used by all downstream production clients.", "implement"},
+		{"delete production storage", "Delete the production cloud storage bucket and all objects because the service is being retired.", "implement"},
+		{"rewrite all customer permissions", "Run this script against every customer production environment to rewrite account permissions.", "auto"},
+		{"remove production security controls", "Remove the production firewall and TLS restrictions to restore connectivity quickly.", "implement"},
+		{"purge customer accounts", "Permanently purge the requested customer accounts and all associated billing records.", "implement"},
+		{"live customer charges", "Change the transaction fee charged to all live customers starting immediately.", "implement"},
+		{"untested production writes", "Deploy this untested database write path to production during active payment processing.", "implement"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Spawn(Options{Root: filepath.Join(root, tc.name), Workspace: workspace, Backend: "agy", Mode: tc.mode, Task: tc.task, Timeout: 30})
+			var review ReviewRequiredError
+			if !errors.As(err, &review) || review.Reason != "high_risk_operation_detected" {
+				t.Fatalf("Spawn error=%v, want high_risk_operation_detected review", err)
+			}
+			if _, statErr := os.Stat(filepath.Join(root, tc.name, "scheduler.lock")); !os.IsNotExist(statErr) {
+				t.Fatalf("scheduler state was created before review: stat err=%v", statErr)
+			}
+		})
+	}
+}
+
+func TestActiveLayaRequiresReviewForNonLatinImplementation(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	if err := os.Mkdir(workspace, 0700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "config.toml")
+	if err := os.WriteFile(configPath, []byte("[laya]\nmode = \"active\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VIOLIN_CONFIG", configPath)
+	t.Setenv("VIOLIN_WORKER_RUNS", filepath.Join(root, "runs"))
+	t.Setenv("VIOLIN_LAYA_MODE", "")
+	SetLocalLayaEngine(confidentLowRiskEngine{})
+	t.Cleanup(func() { SetLocalLayaEngine(nil) })
+
+	_, err := Spawn(Options{Root: filepath.Join(root, "job"), Workspace: workspace, Backend: "agy", Mode: "implement", Task: "ลบฐานข้อมูล production และข้อมูลลูกค้าทั้งหมด", Timeout: 30})
+	var review ReviewRequiredError
+	if !errors.As(err, &review) || review.Reason != "non_latin_implementation_requires_review" {
+		t.Fatalf("Spawn error=%v, want non_latin_implementation_requires_review", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "job", "scheduler.lock")); !os.IsNotExist(statErr) {
+		t.Fatalf("scheduler state was created before review: stat err=%v", statErr)
+	}
+}
+
+func TestActiveLayaDoesNotTreatRoutineSecurityDocumentationAsHighRisk(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	if err := os.Mkdir(workspace, 0700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "config.toml")
+	if err := os.WriteFile(configPath, []byte("[laya]\nmode = \"active\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VIOLIN_CONFIG", configPath)
+	t.Setenv("VIOLIN_WORKER_RUNS", filepath.Join(root, "runs"))
+	t.Setenv("VIOLIN_LAYA_MODE", "")
+	SetLocalLayaEngine(confidentLowRiskEngine{})
+	t.Cleanup(func() { SetLocalLayaEngine(nil) })
+
+	_, err := Spawn(Options{Root: filepath.Join(root, "job"), Workspace: workspace, Backend: "agy", Mode: "implement", Task: "Update docs about authentication middleware and API key setup.", Timeout: 14401})
+	var review ReviewRequiredError
+	if errors.As(err, &review) {
+		t.Fatalf("routine documentation unexpectedly required high-risk review: %s", review.Reason)
+	}
+	if err == nil {
+		t.Fatal("expected timeout validation to stop before worker startup")
+	}
+}
+
+func TestLayaFallbackUsesConfiguredBackendForAutoRequest(t *testing.T) {
+	for _, mode := range []string{"auto", "inspect", "implement"} {
+		result := EvaluateLaya(t.TempDir(), "inspect the code", mode, "auto", config.Config{})
+		if result.Decision == nil {
+			t.Fatalf("mode %s fallback has no decision: %+v", mode, result)
+		}
+		if got := result.Decision.BackendCandidates[0]; got != "agy" {
+			t.Fatalf("mode %s auto fallback backend=%q, want first configured option agy", mode, got)
+		}
+		wantMode := mode
+		if wantMode == "auto" {
+			wantMode = "inspect"
+		}
+		if result.Decision.TaskMode != wantMode {
+			t.Fatalf("mode %s fallback task mode=%q, want %q", mode, result.Decision.TaskMode, wantMode)
+		}
+		if result.Decision.Risk != laya.RiskMedium {
+			t.Fatalf("mode %s fallback risk=%q, want request fallback medium", mode, result.Decision.Risk)
+		}
+		if err := result.Decision.Validate(); err != nil {
+			t.Fatalf("mode %s fallback returned an invalid decision: %+v: %v", mode, result.Decision, err)
+		}
+	}
+}
+
+func TestAutoSkipsUnhealthyQwenAndReportsFallback(t *testing.T) {
+	_, workspace := configureJobRoutingTest(t, "#!/bin/sh\nprintf '{\\\"status\\\":\\\"qwen_unhealthy\\\"}\\n'\nexit 79\n")
+	job, err := Spawn(Options{Root: os.Getenv("VIOLIN_WORKER_RUNS"), Workspace: workspace, Backend: "auto", Mode: "inspect", Task: "inspect", Timeout: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Descriptor.Backend != "agy" || job.Descriptor.FallbackReason != "qwen_health_qwen_unhealthy" || job.Descriptor.HealthStatus != "qwen_unhealthy" {
+		t.Fatalf("auto fallback descriptor = %+v", job.Descriptor)
+	}
+	live := job.Live()
+	if live["fallback_reason"] != "qwen_health_qwen_unhealthy" || live["health_status"] != "qwen_unhealthy" {
+		t.Fatalf("live report omitted fallback evidence: %#v", live)
+	}
+	finished, err := job.Wait(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report, ok := finished.(map[string]any); !ok || report["fallback_reason"] != "qwen_health_qwen_unhealthy" || report["health_status"] != "qwen_unhealthy" {
+		t.Fatalf("finished report omitted fallback evidence: %#v", finished)
+	}
+}
+
+func TestAutoAcceptsHealthyQwenAndAdvancesRoundRobinOnce(t *testing.T) {
+	_, workspace := configureJobRoutingTest(t, "#!/bin/sh\nprintf '{\\\"status\\\":\\\"ready\\\"}\\n'\n")
+	job, err := Spawn(Options{Root: os.Getenv("VIOLIN_WORKER_RUNS"), Workspace: workspace, Backend: "auto", Mode: "inspect", Task: "inspect", Timeout: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Descriptor.Backend != "qwen" || job.Descriptor.HealthStatus != "healthy" || job.Descriptor.FallbackReason != "" {
+		t.Fatalf("healthy Qwen selection = %+v", job.Descriptor)
+	}
+	data, err := os.ReadFile(filepath.Join(os.Getenv("VIOLIN_WORKER_RUNS"), "round-robin.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state map[string]int
+	if err := json.Unmarshal(data, &state); err != nil || state["index"] != 1 {
+		t.Fatalf("round-robin state=%s err=%v, want one advance to index 1", data, err)
+	}
+	_, _ = job.Interrupt()
+}
+
+func TestExplicitQwenRequestDoesNotHealthFallback(t *testing.T) {
+	_, workspace := configureJobRoutingTest(t, "#!/bin/sh\nprintf '{\\\"status\\\":\\\"qwen_unhealthy\\\"}\\n'\nexit 79\n")
+	job, err := Spawn(Options{Root: os.Getenv("VIOLIN_WORKER_RUNS"), Workspace: workspace, Backend: "qwen", Mode: "inspect", Task: "inspect", Timeout: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Descriptor.Backend != "qwen" || job.Descriptor.HealthStatus != "" || job.Descriptor.FallbackReason != "" {
+		t.Fatalf("explicit Qwen request was changed by auto health routing: %+v", job.Descriptor)
+	}
+	_, _ = job.Interrupt()
+}
+
+func TestQwenWorkerEnvironmentLoadsLLMuxKeyWithoutPersistingIt(t *testing.T) {
+	t.Setenv("LLMUX_API_KEY", "")
+	store := credentials.Store{Env: map[string]string{"LLMUX_API_KEY": "worker-test-key"}}
+	for _, entry := range workerEnv(config.Defaults(), "qwen", "", "", "", store) {
+		if entry == "LLMUX_API_KEY=worker-test-key" {
+			return
+		}
+	}
+	t.Fatal("Qwen worker environment omitted LLMux Keychain credential")
+}
+
+func TestAutoFallbackCapacityErrorRetainsQwenHealthFailure(t *testing.T) {
+	root, workspace := configureJobRoutingTest(t, "#!/bin/sh\nprintf '{\\\"status\\\":\\\"qwen_unhealthy\\\"}\\n'\nexit 79\n")
+	configPath := os.Getenv("VIOLIN_CONFIG")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, append(data, []byte("max_concurrency = 1\n")...), 0600); err != nil {
+		t.Fatal(err)
+	}
+	worker := filepath.Join(root, "violin-worker")
+	if err := os.WriteFile(worker, []byte("#!/bin/sh\nsleep 30\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VIOLIN_TEST_JOB_WORKER", "")
+	t.Setenv("VIOLIN_WORKER_BIN", worker)
+	first, err := Spawn(Options{Root: os.Getenv("VIOLIN_WORKER_RUNS"), Workspace: workspace, Backend: "agy", Mode: "inspect", Task: "occupy AGY", Timeout: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Interrupt()
+	_, err = Spawn(Options{Root: os.Getenv("VIOLIN_WORKER_RUNS"), Workspace: workspace, Backend: "auto", Mode: "inspect", Task: "inspect", Timeout: 30})
+	if err == nil || !strings.Contains(err.Error(), "Qwen health check failed (qwen_unhealthy); fallback backend unavailable") {
+		t.Fatalf("fallback capacity error lost Qwen health evidence: %v", err)
+	}
+}
+
+func configureJobRoutingTest(t *testing.T, healthScript string) (string, string) {
+	t.Helper()
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	if err := os.Mkdir(workspace, 0700); err != nil {
+		t.Fatal(err)
+	}
+	healthCommand := filepath.Join(root, "qwen-health")
+	if err := os.WriteFile(healthCommand, []byte(healthScript), 0700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "config.toml")
+	config := "[laya]\nmode = \"shadow\"\n[scheduler]\norder = [\"qwen\", \"agy\"]\n[backend.qwen]\ncommand = [\"fixture\"]\nprotocol = \"qwen\"\nhealth_command = [\"" + healthCommand + "\"]\n[backend.agy]\ncommand = [\"fixture\"]\nprotocol = \"agy\"\n"
+	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VIOLIN_CONFIG", configPath)
+	t.Setenv("VIOLIN_WORKER_RUNS", filepath.Join(root, "runs"))
+	t.Setenv("VIOLIN_TEST_JOB_WORKER", "1")
+	t.Setenv("VIOLIN_LAYA_MODE", "shadow")
+	return root, workspace
+}
 
 func TestOpenRejectsInvalidDescriptors(t *testing.T) {
 	root := t.TempDir()

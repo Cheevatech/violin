@@ -13,21 +13,15 @@ class ServerTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         cache = self.root / "models.json"
-        cache.write_text(json.dumps({"fetched_at": "2099-01-01T00:00:00Z", "models": [{
-            "slug": "qwen3.8-27b", "context_window": 200000,
-            "supported_reasoning_levels": [{"effort": "medium"}],
-            "supported_in_api": True, "provider": "violin_lan", "wire_api": "responses"}]}))
         fake = self.root / "fake-qwen"
         fake.write_text("""#!/usr/bin/env python3
-import sys,pathlib,time,json
-if len(sys.argv) > 1 and sys.argv[1] == 'smoke':
- print('QWEN_SMOKE_OK model=qwen3.8-27b provider=violin_lan')
+import sys,time,json
+if '--max-tool-calls' in sys.argv:
+ print(json.dumps({'type':'result','subtype':'success','result':'VIOLIN_QWEN_CODE_SMOKE_OK'}))
  raise SystemExit(0)
 task=sys.stdin.read()
 if 'SLOW_TEST' in task: time.sleep(30)
-pathlib.Path(sys.argv[sys.argv.index('-o')+1]).write_text('fixture result')
-print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'done'}}))
-print(json.dumps({'type':'turn.completed'}))
+print(json.dumps({'type':'result','subtype':'success','result':'fixture result','usage':{'total_tokens':3}}))
 """)
         fake.chmod(0o700)
         fake_agy = self.root / "fake-agy"
@@ -51,7 +45,6 @@ print(json.dumps({"type": "result", "subtype": "success", "result": "claude fixt
             stderr=subprocess.PIPE, text=True,
             env=dict(os.environ, VIOLIN_QWEN_BIN=str(fake), VIOLIN_WORKER_RUNS=str(self.root/"runs"),
                      VIOLIN_AGY_BIN=str(fake_agy), VIOLIN_CLAUDE_BIN=str(fake_claude),
-                     VIOLIN_CODEX_MODELS_CACHE=str(cache),
                      VIOLIN_QWEN_MAX_CONCURRENCY="1", VIOLIN_AGY_MAX_CONCURRENCY="10"))
 
     def tearDown(self):

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -47,7 +48,7 @@ func (f *fakeInferenceRuntime) Predict(state string, questions []Question) ([]An
 				chosen = option
 			}
 		}
-		answers = append(answers, Answer{ID: q.ID, Kind: q.Kind, Value: chosen, Probabilities: probabilities, Confidence: probabilities[chosen]})
+		answers = append(answers, Answer{ID: q.ID, Kind: q.Kind, Value: chosen, Probabilities: probabilities, Confidence: probabilityConfidence(probabilities)})
 	}
 	return answers, "cpu", nil
 }
@@ -75,12 +76,16 @@ func TestSelectCheckpointEnglishAndThai(t *testing.T) {
 	}
 }
 
-func TestSerializeUpstreamStatePreservesUnicodeAndCompactJSON(t *testing.T) {
-	got, err := serializeUpstreamState(map[string]any{"task": "ช่วยตรวจ <ไฟล์>", "mode": "inspect"})
+func TestSerializeUpstreamStateUsesUpstreamJSONSpacing(t *testing.T) {
+	got, err := serializeUpstreamState(map[string]any{
+		"task":    "ช่วยตรวจ <ไฟล์>",
+		"mode":    "inspect",
+		"context": map[string]any{"count": 2, "labels": []any{"a", "b"}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != `{"task":"ช่วยตรวจ <ไฟล์>","mode":"inspect"}` {
+	if got != `{"task": "ช่วยตรวจ <ไฟล์>", "mode": "inspect", "context": {"count": 2, "labels": ["a", "b"]}}` {
 		t.Fatalf("serialized state=%q", got)
 	}
 }
@@ -116,6 +121,26 @@ func TestUpstreamEngineMapsTypedProbabilitiesToDecision(t *testing.T) {
 	}
 	if !strings.Contains(runtime.state, "inspect code") {
 		t.Fatalf("state=%q", runtime.state)
+	}
+}
+
+func TestUpstreamEnginePreservesConfidenceDerivedByNativeAdapter(t *testing.T) {
+	answers, _, err := (&fakeInferenceRuntime{}).Predict("task", testDecisionQuestions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	answers[0].Confidence = 0.1234
+	fake := &fakeInferenceRuntime{answers: answers}
+	engine := newUpstreamEngine(t.TempDir(), func(string, string, bool) (InferenceRuntime, string, error) {
+		return fake, "cpu", nil
+	})
+	defer engine.Close()
+	result, err := engine.Evaluate(Request{Language: "en", State: "task", Questions: testDecisionQuestions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Decision.Confidence != 0.1234 || result.Decision.HeadConfidence["backend"] != 0.1234 {
+		t.Fatalf("decision lost native confidence precision: %+v", result.Decision)
 	}
 }
 
@@ -164,6 +189,23 @@ func TestUpstreamEngineRejectsMalformedTypedOutput(t *testing.T) {
 	}
 }
 
+func TestUpstreamEngineRejectsInvalidAnswerConfidence(t *testing.T) {
+	answers, _, err := (&fakeInferenceRuntime{}).Predict("task", testDecisionQuestions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	answers[0].Confidence = math.NaN()
+	fake := &fakeInferenceRuntime{answers: answers}
+	engine := newUpstreamEngine(t.TempDir(), func(string, string, bool) (InferenceRuntime, string, error) {
+		return fake, "cpu", nil
+	})
+	defer engine.Close()
+	_, err = engine.Evaluate(Request{Language: "en", State: "task", Questions: testDecisionQuestions()})
+	if err == nil || !strings.Contains(err.Error(), `invalid "backend" confidence`) {
+		t.Fatalf("err=%v, want invalid backend confidence", err)
+	}
+}
+
 func TestUpstreamEngineReportsLoaderFailure(t *testing.T) {
 	engine := newUpstreamEngine(t.TempDir(), func(string, string, bool) (InferenceRuntime, string, error) {
 		return nil, "", fmt.Errorf("bad ONNX bundle")
@@ -195,6 +237,9 @@ func TestUpstreamEngineCoreMLRequiresExplicitOptIn(t *testing.T) {
 }
 
 func TestEnsureUpstreamDownloadsAndVerifiesBothCheckpoints(t *testing.T) {
+	if !nativeRuntimeAvailable() {
+		t.Skip("successful installation requires a CGO-enabled ONNX Runtime")
+	}
 	platform, ok := supportedPlatform()
 	if !ok {
 		t.Skipf("unsupported local platform %s/%s", "test", "test")
@@ -228,6 +273,9 @@ func TestEnsureUpstreamDownloadsAndVerifiesBothCheckpoints(t *testing.T) {
 	status := UpstreamRuntimeStatus(root)
 	if !status.Installed || status.FallbackInUse || !status.Checkpoints["typed-decisions"] || !status.Checkpoints["multilingual"] {
 		t.Fatalf("status=%+v", status)
+	}
+	if status.LayaVersion != UpstreamVersion || status.RuntimeVersion != "onnxruntime-go/"+ORTVersion || status.CheckpointRevision != CheckpointRevision {
+		t.Fatalf("status version metadata=%+v", status)
 	}
 	if status.Runtime == "" {
 		t.Fatalf("status has no runtime path: %+v", status)
@@ -274,6 +322,9 @@ func TestEnsureUpstreamRejectsChecksumMismatchAndKeepsFallbackStatus(t *testing.
 }
 
 func TestModelStatusDetectsPostInstallTampering(t *testing.T) {
+	if !nativeRuntimeAvailable() {
+		t.Skip("installed runtime status requires a CGO-enabled ONNX Runtime")
+	}
 	platform, ok := supportedPlatform()
 	if !ok {
 		t.Skip("unsupported platform")
@@ -310,6 +361,39 @@ func TestModelStatusDetectsPostInstallTampering(t *testing.T) {
 	}
 }
 
+func TestNoCGOStatusReportsFallbackForVerifiedBundle(t *testing.T) {
+	if nativeRuntimeAvailable() {
+		t.Skip("only applies to builds without CGO")
+	}
+	platform, ok := supportedPlatform()
+	if !ok {
+		t.Skip("unsupported platform")
+	}
+	manifest, files := fixtureManifest(platform)
+	root := t.TempDir()
+	bundleDir := filepath.Join(root, "laya", "onnx")
+	for _, artifact := range manifest.Artifacts {
+		path := filepath.Join(bundleDir, artifact.Path)
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, files[artifact.Asset], 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundleDir, "manifest.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	status := UpstreamRuntimeStatus(root)
+	if status.Installed || !status.FallbackInUse || !strings.Contains(status.Error, "CGO disabled") {
+		t.Fatalf("status=%+v", status)
+	}
+}
+
 func TestPlatformSupportMatrix(t *testing.T) {
 	for _, tc := range []struct {
 		goos, goarch string
@@ -326,17 +410,8 @@ func TestPlatformSupportMatrix(t *testing.T) {
 }
 
 func TestPackageUpstreamBundleCreatesChecksumManifest(t *testing.T) {
-	platform, ok := supportedPlatform()
-	if !ok {
-		t.Skip("unsupported local platform")
-	}
-	parts := strings.Split(platform, "-")
 	root, output := t.TempDir(), t.TempDir()
-	runtimePath := "runtime/libonnxruntime.so"
-	if runtime.GOOS == "darwin" {
-		runtimePath = "runtime/libonnxruntime.dylib"
-	}
-	paths := []string{runtimePath}
+	paths := []string{"runtime/libonnxruntime.so", "runtime/libonnxruntime.dylib"}
 	for _, variant := range []string{"typed-decisions", "multilingual"} {
 		prefix := "checkpoints/" + variant + "/"
 		for _, name := range []string{"laya.onnx", "rl_agent_config.json", "tokenizer/tokenizer.json", "tokenizer/tokenizer_config.json"} {
@@ -352,30 +427,50 @@ func TestPackageUpstreamBundleCreatesChecksumManifest(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := PackageUpstreamBundle(root, output, parts[0], parts[1]); err != nil {
-		t.Fatal(err)
+	for _, tc := range []struct{ goos, goarch string }{{"darwin", "arm64"}, {"linux", "amd64"}, {"linux", "arm64"}} {
+		t.Run(tc.goos+"-"+tc.goarch, func(t *testing.T) {
+			platform, ok := supportedPlatformFor(tc.goos, tc.goarch)
+			if !ok {
+				t.Fatalf("test platform %s/%s is unsupported", tc.goos, tc.goarch)
+			}
+			if err := PackageUpstreamBundle(root, output, tc.goos, tc.goarch); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(output, "manifest-"+platform+".json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var manifest bundleManifest
+			if err := json.Unmarshal(data, &manifest); err != nil {
+				t.Fatal(err)
+			}
+			if err := validateBundleManifest(manifest, platform); err != nil {
+				t.Fatal(err)
+			}
+			tooLarge := manifest
+			tooLarge.Artifacts = append([]bundleArtifact(nil), manifest.Artifacts...)
+			tooLarge.Artifacts[1].Size = 1 << 40
+			if err := validateBundleManifest(tooLarge, platform); err == nil || !strings.Contains(err.Error(), "invalid Laya bundle artifact") {
+				t.Fatalf("oversized model artifact accepted: %v", err)
+			}
+			for _, artifact := range manifest.Artifacts {
+				if err := verifyBundleFile(filepath.Join(output, artifact.Asset), artifact); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
 	}
-	data, err := os.ReadFile(filepath.Join(output, "manifest-"+platform+".json"))
-	if err != nil {
-		t.Fatal(err)
+	if _, ok := supportedPlatformFor("windows", "amd64"); ok {
+		t.Fatal("unsupported windows target was accepted")
 	}
-	var manifest bundleManifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		t.Fatal(err)
+	if _, ok := supportedPlatformFor("darwin", "amd64"); ok {
+		t.Fatal("unsupported darwin/amd64 target was accepted")
 	}
-	if err := validateBundleManifest(manifest, platform); err != nil {
-		t.Fatal(err)
+	if err := PackageUpstreamBundle(root, output, "windows", "amd64"); err == nil {
+		t.Fatal("package accepted unsupported target")
 	}
-	tooLarge := manifest
-	tooLarge.Artifacts = append([]bundleArtifact(nil), manifest.Artifacts...)
-	tooLarge.Artifacts[1].Size = 1 << 40
-	if err := validateBundleManifest(tooLarge, platform); err == nil || !strings.Contains(err.Error(), "invalid Laya bundle artifact") {
-		t.Fatalf("oversized model artifact accepted: %v", err)
-	}
-	for _, artifact := range manifest.Artifacts {
-		if err := verifyBundleFile(filepath.Join(output, artifact.Asset), artifact); err != nil {
-			t.Fatal(err)
-		}
+	if err := PackageUpstreamBundle(root, output, "darwin", "amd64"); err == nil {
+		t.Fatal("package accepted unsupported darwin/amd64 target")
 	}
 }
 
@@ -413,7 +508,144 @@ func TestRealUpstreamInferenceSmoke(t *testing.T) {
 		if result.Fallback || result.Decision == nil || !strings.Contains(result.ModelVersion, "/"+tc.checkpoint+"@") {
 			t.Fatalf("expected real %s inference, got %+v", tc.checkpoint, result)
 		}
+		assertRealDecisionContract(t, result, testDecisionQuestions())
+		if tc.checkpoint == "typed-decisions" {
+			assertTypedDecisionReference(t, engine.model)
+		} else if tc.checkpoint == "multilingual" {
+			assertMultilingualDecisionReference(t, engine.model)
+		}
 		t.Logf("%s device=%s latency=%.1fms decision=%+v", tc.checkpoint, engine.device, result.LatencyMS, result.Decision)
+	}
+}
+
+func assertTypedDecisionReference(t *testing.T, runtime InferenceRuntime) {
+	t.Helper()
+	// Frozen SDK reference: litert-community/Laya-English-LiteRT at
+	// 504b08d32a79100f984d65c69402c5a964a2d9d2,
+	// typed-decisions/fixtures/gate_rows_td_s256.json, TD1_01/action.
+	// The ordered JSON text preserves the SDK fixture's serialization and tokenizer input.
+	state := `{"case_id": "TD1_01", "workflow": "agent_trace_observability", "record": "The agent was asked to count red blocks in a local test file. It read the file, returned a count of seven, and a separate checker confirmed seven. No files were changed."}`
+	question := Question{
+		ID: "action", Kind: Choice,
+		Prompt:  "What should happen next after this agent trace?",
+		Options: []string{"close", "continue", "retry", "escalate", "stop"},
+		OptionDescriptions: map[string]string{
+			"close":    "finish because the task is complete",
+			"continue": "continue the permitted task",
+			"retry":    "retry a recoverable failed step",
+			"escalate": "ask a human reviewer to decide",
+			"stop":     "stop an unsafe or unauthorized operation",
+		},
+	}
+	answers, _, err := runtime.Predict(state, []Question{question})
+	if err != nil {
+		t.Fatalf("typed-decisions SDK reference inference: %v", err)
+	}
+	if len(answers) != 1 || answers[0].Value != "continue" {
+		t.Fatalf("typed-decisions SDK reference answer=%+v, want continue", answers)
+	}
+	want := []float64{0.17, 0.2956, 0.2562, 0.1801, 0.0981}
+	for index, option := range question.Options {
+		got := answers[0].Probabilities[option]
+		if math.Abs(got-want[index]) > 0.001 {
+			t.Fatalf("typed-decisions SDK reference probability for %q=%0.4f, want %0.4f ±0.001", option, got, want[index])
+		}
+	}
+	if math.Abs(answers[0].Confidence-0.0388) > 0.0001 {
+		t.Fatalf("typed-decisions SDK reference confidence=%0.4f, want 0.0388 ±0.0001", answers[0].Confidence)
+	}
+}
+
+func assertMultilingualDecisionReference(t *testing.T, runtime InferenceRuntime) {
+	t.Helper()
+	type preparedSequencePredictor interface {
+		predictPreparedSequence(ids, markers []int, question Question, temperature float64) (Answer, error)
+	}
+	predictor, ok := runtime.(preparedSequencePredictor)
+	if !ok {
+		t.Fatalf("real multilingual runtime %T cannot run the pinned sequence reference", runtime)
+	}
+	// Frozen SDK reference: Laya-Multilingual-CoreAI at 3fe58a5ed7857b41f5c7ba8c0f46ce420b42cf02,
+	// macos/fp32-s256/reference.json, row ML_A04/department. Its model snapshot 1c5edc17... has
+	// the same multilingual weights, config and tokenizer blobs as Violin's checkpoint snapshot.
+	ids := []int{
+		2, 6241, 2872, 235292, 12236, 9888, 1412, 6589, 736, 3853, 235336, 1,
+		4, 54972, 235292, 88220, 235269, 15598, 235269, 85869, 4, 9838, 235292, 30608,
+		235269, 142788, 235269, 1812, 10266, 4, 7108, 235292, 25063, 235269, 888, 20078,
+		4, 1156, 235292, 4553, 1354, 1, 19946, 2273, 1192, 664, 63090, 236948, 824, 664,
+		15029, 1192, 664, 217491, 133074, 824, 664, 2168, 1192, 664, 62737, 235425, 217491,
+		235400, 33341, 150432, 47644, 235362, 236631, 238082, 235432, 236572, 235854,
+		54934, 235362, 12990, 1,
+	}
+	if len(ids) != 77 {
+		t.Fatalf("multilingual reference sequence has %d IDs, want 77", len(ids))
+	}
+	question := Question{
+		ID: "department", Kind: Choice, Prompt: "Which department should handle this request?",
+		Options: []string{"billing", "technical", "sales", "other"},
+		OptionDescriptions: map[string]string{
+			"billing":   "invoices, payments, refunds",
+			"technical": "bugs, outages, system errors",
+			"sales":     "pricing, new contracts",
+			"other":     "everything else",
+		},
+	}
+	answer, err := predictor.predictPreparedSequence(ids, []int{12, 20, 29, 36}, question, 1)
+	if err != nil {
+		t.Fatalf("multilingual SDK reference inference: %v", err)
+	}
+	if answer.Value != "billing" {
+		t.Fatalf("multilingual SDK reference answer=%v, want billing", answer.Value)
+	}
+	want := map[string]float64{"billing": 0.9992, "technical": 0, "sales": 0.0008, "other": 0}
+	for option, probability := range want {
+		if math.Abs(answer.Probabilities[option]-probability) > 0.001 {
+			t.Fatalf("multilingual SDK reference probability %q=%0.4f, want %0.4f ±0.001", option, answer.Probabilities[option], probability)
+		}
+	}
+	if math.Abs(answer.Confidence-0.9953) > 0.0001 {
+		t.Fatalf("multilingual SDK reference confidence=%0.4f, want 0.9953 ±0.0001", answer.Confidence)
+	}
+}
+
+func assertRealDecisionContract(t *testing.T, result Result, questions []Question) {
+	t.Helper()
+	if err := result.Decision.Validate(); err != nil {
+		t.Fatalf("real inference returned invalid decision: %v", err)
+	}
+	if len(result.Answers) != len(questions) {
+		t.Fatalf("real inference returned %d answers for %d questions", len(result.Answers), len(questions))
+	}
+	answers := make(map[string]Answer, len(result.Answers))
+	for _, answer := range result.Answers {
+		if _, exists := answers[answer.ID]; exists {
+			t.Fatalf("real inference returned duplicate answer %q", answer.ID)
+		}
+		answers[answer.ID] = answer
+	}
+	for _, question := range questions {
+		answer, ok := answers[question.ID]
+		if !ok {
+			t.Fatalf("real inference omitted answer %q", question.ID)
+		}
+		chosen, ok := answer.Value.(string)
+		if !ok || !containsString(question.Options, chosen) {
+			t.Fatalf("real inference answer %q=%#v is not one of its options", question.ID, answer.Value)
+		}
+		if err := validateAnswerProbabilities(question.ID, question.Options, answer.Probabilities, chosen); err != nil {
+			t.Fatalf("real inference probabilities: %v", err)
+		}
+		if answer.Fallback || result.Decision.HeadConfidence[question.ID] != answer.Confidence {
+			t.Fatalf("real inference head confidence mismatch for %q: answer=%+v decision=%+v", question.ID, answer, result.Decision)
+		}
+		ordered := sortedProbabilities(answer.Probabilities)
+		margin := ordered[0].probability
+		if len(ordered) > 1 {
+			margin -= ordered[1].probability
+		}
+		if result.Decision.HeadMargin[question.ID] != margin {
+			t.Fatalf("real inference head margin mismatch for %q: got=%v want=%v", question.ID, result.Decision.HeadMargin[question.ID], margin)
+		}
 	}
 }
 

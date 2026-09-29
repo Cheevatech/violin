@@ -16,6 +16,7 @@ An unauthenticated request returns `auth_required` with a safe next action.
 
 ## Consequences
 
-The public default is portable across users and harnesses. Local routes such as
-`violin_lan` must be opt-in profiles. Global config and project policy can be
-shared, while secrets remain in environment variables or the OS keychain.
+The public default is portable across users and harnesses. User-specific
+endpoints and models must be opt-in configuration, never baked into the public
+defaults. Global config and project policy can be shared, while secrets remain
+in environment variables or the OS keychain.

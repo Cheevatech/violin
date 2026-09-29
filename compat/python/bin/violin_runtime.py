@@ -24,7 +24,7 @@ def qwen_health(config, health_script=None, timeout=45):
 
     The returned evidence is intentionally JSON-serialisable and is also safe
     to put in a bounded MCP response.  Custom health commands take precedence;
-    built-in health keeps the metadata/smoke environment and exit semantics.
+    built-in health proves the configured Qwen Code CLI can complete inference.
     """
     health_script = Path(health_script or ROOT.with_name("violin-health"))
     if config.get("custom_commands", {}).get("qwen"):
@@ -32,7 +32,7 @@ def qwen_health(config, health_script=None, timeout=45):
         if healthy is None:
             return True, {"status": "custom_command", "skipped": "builtin_qwen_health"}
         return healthy, evidence
-    env = dict(os.environ, VIOLIN_METADATA_TIMEOUT="8", VIOLIN_SMOKE_TIMEOUT="35")
+    env = dict(os.environ, VIOLIN_SMOKE_TIMEOUT="35")
     qwen_bin = config.get("commands", {}).get("qwen")
     if qwen_bin and not config.get("custom_commands", {}).get("qwen"):
         env["VIOLIN_QWEN_BIN"] = str(qwen_bin)

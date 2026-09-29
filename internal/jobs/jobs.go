@@ -18,6 +18,7 @@ import (
 	"github.com/film/violin/internal/auth"
 	"github.com/film/violin/internal/config"
 	"github.com/film/violin/internal/credentials"
+	"github.com/film/violin/internal/health"
 	"github.com/film/violin/internal/laya"
 	"github.com/film/violin/internal/models"
 	"github.com/film/violin/internal/supervisor"
@@ -30,11 +31,16 @@ type Options struct {
 	RiskReviewed                                           bool
 	Timeout, IdleTimeout                                   int
 	TimeoutSource                                          string
+	FallbackReason                                         string
+	HealthStatus                                           string
 }
 type Descriptor struct {
 	AgentID          string         `json:"agent_id"`
 	Backend          string         `json:"backend"`
+	RequestedModel   string         `json:"requested_model,omitempty"`
 	RequestedBackend string         `json:"requested_backend"`
+	FallbackReason   string         `json:"fallback_reason,omitempty"`
+	HealthStatus     string         `json:"health_status,omitempty"`
 	PID              int            `json:"pid"`
 	Lease            string         `json:"lease"`
 	Evidence         string         `json:"evidence"`
@@ -129,7 +135,14 @@ func Spawn(o Options) (*Job, error) {
 	decision := EvaluateLaya(o.Root, o.Task, o.Mode, o.Backend, cfg)
 	requestedMode := o.Mode
 	if layaMode == "active" {
-		if reason := ReviewReason(decision.Fallback, decision.Decision, o.Mode, o.RiskReviewed); reason != "" {
+		reason := ""
+		if !o.RiskReviewed {
+			reason = activeTaskReviewReason(o.Task, o.Mode)
+		}
+		if reason == "" {
+			reason = ReviewReason(decision.Fallback, decision.Decision, o.Mode, o.RiskReviewed)
+		}
+		if reason != "" {
 			return nil, ReviewRequiredError{Decision: decision.Decision, Reason: reason}
 		}
 		if decision.Decision != nil && !decision.Fallback {
@@ -199,17 +212,52 @@ func Spawn(o Options) (*Job, error) {
 		if len(readyOrder) == 0 && authError != nil {
 			return nil, authError
 		}
+		roundRobinOrder := append([]string(nil), readyOrder...)
 		preferred := []string(nil)
 		backendConfidence, backendMargin, backendKnown := headStats(decision.Decision, "backend")
 		if layaMode == "active" && !decision.Fallback && backendKnown && backendConfidence >= 0.80 && backendMargin >= 0.15 {
 			preferred = decision.Decision.BackendCandidates
 		}
-		o.Backend, err = selectBackend(o.Root, readyOrder, cfg.Backend, preferred, cfg.Scheduler, sessionID(o), true)
+		selected, selectErr := selectBackend(o.Root, readyOrder, cfg.Backend, preferred, cfg.Scheduler, sessionID(o), false)
+		if selectErr != nil {
+			return nil, selectErr
+		}
+		if selected == "qwen" && healthCommandConfigured(cfg.Backend["qwen"].HealthCommand) {
+			probe := health.Check(context.Background(), cfg, "qwen", credentials.Default())
+			if probe.Healthy {
+				o.HealthStatus = safeHealthStatus(probe.Status)
+			} else {
+				o.HealthStatus = safeHealthStatus(probe.Status)
+				o.FallbackReason = "qwen_health_" + o.HealthStatus
+				filtered := make([]string, 0, len(readyOrder))
+				for _, name := range readyOrder {
+					if name != "qwen" {
+						filtered = append(filtered, name)
+					}
+				}
+				readyOrder = filtered
+				if len(readyOrder) == 0 {
+					return nil, fmt.Errorf("qwen health check failed (%s) and no fallback backend is available", probe.Status)
+				}
+				filteredPreferred := make([]string, 0, len(preferred))
+				for _, name := range preferred {
+					if name != "qwen" {
+						filteredPreferred = append(filteredPreferred, name)
+					}
+				}
+				preferred = filteredPreferred
+			}
+		}
+		o.Backend, err = selectBackend(o.Root, readyOrder, cfg.Backend, preferred, cfg.Scheduler, sessionID(o), false)
 		if err != nil {
+			if o.FallbackReason != "" {
+				return nil, fmt.Errorf("Qwen health check failed (%s); fallback backend unavailable: %w", o.HealthStatus, err)
+			}
 			return nil, err
 		}
+		advanceRoundRobin(o.Root, roundRobinOrder, o.Backend)
 	}
-	if o.Backend != "agy" && o.Backend != "qwen" && o.Backend != "claude" {
+	if o.Backend != "agy" && o.Backend != "qwen" && o.Backend != "claude" && o.Backend != "codex" {
 		return nil, errors.New("invalid backend")
 	}
 	if authError := checkAuth(o.Backend, cfg.Backend[o.Backend]); authError != nil {
@@ -284,7 +332,7 @@ func Spawn(o Options) (*Job, error) {
 		return nil, err
 	}
 	cmd.Stdout, cmd.Stderr, cmd.Dir = stdout, stderr, o.Workspace
-	cmd.Env = workerEnv(cfg, o.Backend, statusPath, o.Root, o.TimeoutSource)
+	cmd.Env = workerEnv(cfg, o.Backend, statusPath, o.Root, o.TimeoutSource, credentials.Default())
 	cmd.Env = append(cmd.Env, "VIOLIN_WORKER_EVIDENCE="+run)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err = cmd.Start(); err != nil {
@@ -298,7 +346,7 @@ func Spawn(o Options) (*Job, error) {
 			attempt = previous.Descriptor.Attempt + 1
 		}
 	}
-	d := Descriptor{AgentID: fmt.Sprintf("%d-%d", time.Now().UnixNano(), cmd.Process.Pid), Backend: o.Backend, RequestedBackend: o.RequestedBackend, PID: cmd.Process.Pid, Lease: fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid()), Evidence: run, Workspace: o.Workspace, Output: outputPath, Status: statusPath, TaskFile: taskPath, Mode: o.Mode, Timeout: o.Timeout, TimeoutSource: o.TimeoutSource, IdleTimeout: o.IdleTimeout, IdleEnabled: config.IdleTimeoutEnabled(o.Backend, cfg.Backend[o.Backend]), OwnerPID: os.Getpid(), OwnerInstance: o.OwnerInstance, SessionID: sessionID(o), CreatedAt: time.Now(), LayaMode: layaMode, LayaFallback: decision.Fallback, LayaModelVersion: decision.ModelVersion, LayaError: decision.Error, LayaDecision: decision.Decision, RiskReviewed: o.RiskReviewed, SupervisorMode: cfg.Laya.Supervisor.Mode, SupervisorState: "starting", SupervisorStale: cfg.Laya.Supervisor.StaleSeconds, MaxAttempts: maxAttempts, Attempt: attempt, ParentAgentID: o.ParentAgentID}
+	d := Descriptor{AgentID: fmt.Sprintf("%d-%d", time.Now().UnixNano(), cmd.Process.Pid), Backend: o.Backend, RequestedModel: cfg.Backend[o.Backend].EffectiveModel(), RequestedBackend: o.RequestedBackend, FallbackReason: o.FallbackReason, HealthStatus: o.HealthStatus, PID: cmd.Process.Pid, Lease: fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid()), Evidence: run, Workspace: o.Workspace, Output: outputPath, Status: statusPath, TaskFile: taskPath, Mode: o.Mode, Timeout: o.Timeout, TimeoutSource: o.TimeoutSource, IdleTimeout: o.IdleTimeout, IdleEnabled: config.IdleTimeoutEnabled(o.Backend, cfg.Backend[o.Backend]), OwnerPID: os.Getpid(), OwnerInstance: o.OwnerInstance, SessionID: sessionID(o), CreatedAt: time.Now(), LayaMode: layaMode, LayaFallback: decision.Fallback, LayaModelVersion: decision.ModelVersion, LayaError: decision.Error, LayaDecision: decision.Decision, RiskReviewed: o.RiskReviewed, SupervisorMode: cfg.Laya.Supervisor.Mode, SupervisorState: "starting", SupervisorStale: cfg.Laya.Supervisor.StaleSeconds, MaxAttempts: maxAttempts, Attempt: attempt, ParentAgentID: o.ParentAgentID}
 	j := &Job{Descriptor: d, path: filepath.Join(o.Root, "jobs", d.AgentID+".json"), cmd: cmd}
 	if err = os.MkdirAll(filepath.Dir(j.path), 0700); err != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
@@ -480,7 +528,14 @@ func (j *Job) workerMatches() bool {
 }
 func (j *Job) Live() map[string]any {
 	observation := j.observe()
-	return map[string]any{"agent_id": j.Descriptor.AgentID, "status": "running", "selected_backend": j.Descriptor.Backend, "requested_backend": j.Descriptor.RequestedBackend, "evidence": j.Descriptor.Evidence, "effective_timeout_seconds": j.Descriptor.Timeout, "timeout_source": j.Descriptor.TimeoutSource, "max_attempts": j.Descriptor.MaxAttempts, "attempt": j.Descriptor.Attempt, "resumed_from": j.Descriptor.ParentAgentID, "idle_timeout_seconds": j.Descriptor.IdleTimeout, "idle_timeout_enabled": j.Descriptor.IdleEnabled, "risk_reviewed": j.Descriptor.RiskReviewed, "laya_mode": j.Descriptor.LayaMode, "laya_fallback": j.Descriptor.LayaFallback, "laya_model_version": j.Descriptor.LayaModelVersion, "laya_decision": j.Descriptor.LayaDecision, "supervisor_mode": j.Descriptor.SupervisorMode, "supervisor_state": observation.State, "supervisor_action": observation.Action, "supervisor_reason": observation.Reason, "supervisor_updated_at": observation.UpdatedAt, "supervisor_last_event_at": observation.LastEvent, "supervisor_event_count": observation.EventCount}
+	return map[string]any{"agent_id": j.Descriptor.AgentID, "status": "running", "selected_backend": j.Descriptor.Backend, "requested_backend": j.Descriptor.RequestedBackend, "requested_model": j.Descriptor.RequestedModel, "actual_model": "unknown", "model_status": modelStatus(j.Descriptor.RequestedModel), "fallback_reason": j.Descriptor.FallbackReason, "health_status": j.Descriptor.HealthStatus, "evidence": j.Descriptor.Evidence, "effective_timeout_seconds": j.Descriptor.Timeout, "timeout_source": j.Descriptor.TimeoutSource, "max_attempts": j.Descriptor.MaxAttempts, "attempt": j.Descriptor.Attempt, "resumed_from": j.Descriptor.ParentAgentID, "idle_timeout_seconds": j.Descriptor.IdleTimeout, "idle_timeout_enabled": j.Descriptor.IdleEnabled, "risk_reviewed": j.Descriptor.RiskReviewed, "laya_mode": j.Descriptor.LayaMode, "laya_fallback": j.Descriptor.LayaFallback, "laya_model_version": j.Descriptor.LayaModelVersion, "laya_decision": j.Descriptor.LayaDecision, "supervisor_mode": j.Descriptor.SupervisorMode, "supervisor_state": observation.State, "supervisor_action": observation.Action, "supervisor_reason": observation.Reason, "supervisor_updated_at": observation.UpdatedAt, "supervisor_last_event_at": observation.LastEvent, "supervisor_event_count": observation.EventCount}
+}
+
+func modelStatus(model string) string {
+	if strings.TrimSpace(model) == "" {
+		return "unknown"
+	}
+	return "configured"
 }
 
 func (j *Job) observe() supervisor.Observation {
@@ -546,6 +601,15 @@ func (j *Job) finish() (map[string]any, error) {
 	value["agent_id"] = j.Descriptor.AgentID
 	value["selected_backend"] = j.Descriptor.Backend
 	value["requested_backend"] = j.Descriptor.RequestedBackend
+	value["requested_model"] = j.Descriptor.RequestedModel
+	if _, ok := value["actual_model"]; !ok {
+		value["actual_model"] = "unknown"
+	}
+	if _, ok := value["model_status"]; !ok {
+		value["model_status"] = modelStatus(j.Descriptor.RequestedModel)
+	}
+	value["fallback_reason"] = j.Descriptor.FallbackReason
+	value["health_status"] = j.Descriptor.HealthStatus
 	value["laya_mode"] = j.Descriptor.LayaMode
 	value["laya_fallback"] = j.Descriptor.LayaFallback
 	value["laya_model_version"] = j.Descriptor.LayaModelVersion
@@ -922,6 +986,41 @@ func selectBackend(root string, order []string, backendConfig map[string]config.
 	return "", errors.New("worker capacity is full")
 }
 
+func healthCommandConfigured(value any) bool {
+	switch command := value.(type) {
+	case string:
+		return strings.TrimSpace(command) != ""
+	case []string:
+		return len(command) > 0
+	case []any:
+		return len(command) > 0
+	default:
+		return false
+	}
+}
+
+func safeHealthStatus(status string) string {
+	switch status {
+	case "healthy", "ready", "unavailable", "timeout", "unconfigured", "qwen_unhealthy":
+		return status
+	default:
+		return "unavailable"
+	}
+}
+
+func advanceRoundRobin(root string, order []string, selected string) {
+	if len(order) == 0 {
+		return
+	}
+	for index, backend := range order {
+		if backend == selected {
+			data, _ := json.Marshal(map[string]int{"index": (index + 1) % len(order)})
+			_ = os.WriteFile(filepath.Join(root, "round-robin.json"), data, 0600)
+			return
+		}
+	}
+}
+
 func contains(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {
@@ -939,9 +1038,14 @@ func capacity(name string, backendConfig map[string]config.Backend) int {
 	return limit
 }
 
-func workerEnv(cfg config.Config, backend, statusPath, root, timeoutSource string) []string {
+func workerEnv(cfg config.Config, backend, statusPath, root, timeoutSource string, store credentials.Store) []string {
 	env := os.Environ()
 	env = append(env, "VIOLIN_WORKER_STATUS="+statusPath, "VIOLIN_WORKER_RUNS="+root, "VIOLIN_TIMEOUT_SOURCE="+timeoutSource)
+	if backend == "qwen" {
+		if key, err := store.Lookup(context.Background(), "LLMUX_API_KEY", "violin-llmux-api-key"); err == nil {
+			env = replaceEnvEntry(env, "LLMUX_API_KEY", key)
+		}
+	}
 	item, ok := cfg.Backend[backend]
 	if !ok || item.Command == nil {
 		return env
@@ -950,6 +1054,17 @@ func workerEnv(cfg config.Config, backend, statusPath, root, timeoutSource strin
 	prefix := "VIOLIN_" + strings.ToUpper(backend) + "_"
 	env = append(env, prefix+"COMMAND="+string(data), prefix+"CUSTOM=1", prefix+"PROTOCOL="+item.Protocol, prefix+"STDIN="+strconv.FormatBool(item.Stdin))
 	return env
+}
+
+func replaceEnvEntry(env []string, name, value string) []string {
+	prefix := name + "="
+	result := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, prefix) {
+			result = append(result, entry)
+		}
+	}
+	return append(result, prefix+value)
 }
 
 func EvaluateLaya(root, task, mode, requested string, cfg config.Config) laya.Result {
@@ -985,6 +1100,9 @@ func EvaluateLaya(root, task, mode, requested string, cfg config.Config) laya.Re
 	}
 	result, _ := engine.Evaluate(request)
 	result.Fallback = true
+	if result.Decision != nil && (mode == "inspect" || mode == "implement") {
+		result.Decision.TaskMode = mode
+	}
 	if result.Error == "" {
 		result.Error = "upstream Laya ONNX runtime is not available; Go classifier fallback is in use"
 	}

@@ -30,8 +30,18 @@ Control Plane, but the Job remains owned by Violin's lifecycle contract.
 
 ## Laya Engine
 
-Violin's policy component for producing typed routing or safety decisions. Laya
-uses an English control protocol and may fall back to deterministic policy.
+Violin's integration boundary for typed routing or safety decisions. This term
+is distinct from upstream Laya AI, the open source decision-model project by
+Convai Innovations. Violin should call the upstream Laya package locally
+behind this boundary; it should not add a second Laya MCP server. The existing
+Go policy engine is a Violin implementation, not the upstream Laya model.
+
+## Upstream Laya AI
+
+The open source, non-autoregressive decision-model package maintained at
+`github.com/NandhaKishorM/laya`. It returns typed choices, scores, and yes/no
+probabilities; it is not a text-generating LLM. Violin owns the MCP surface and
+uses its existing Laya Engine boundary to call the local package.
 
 ## Model Artifact
 

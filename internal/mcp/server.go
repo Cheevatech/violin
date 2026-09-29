@@ -60,6 +60,10 @@ func Run(in io.Reader, out io.Writer) error {
 		if err := json.Unmarshal(s.Bytes(), &req); err != nil {
 			continue
 		}
+		if req.ID == nil {
+			// JSON-RPC notifications do not receive a response.
+			continue
+		}
 		r := response{JSONRPC: "2.0", ID: req.ID}
 		var value any
 		var err error
@@ -99,7 +103,7 @@ func tools() map[string]any {
 		return map[string]any{"type": "object", "properties": properties, "required": required, "additionalProperties": false}
 	}
 	return map[string]any{"tools": []map[string]any{
-		{"name": "spawn_agent", "description": "Delegate a bounded task to an external coding agent.", "inputSchema": object(map[string]any{"backend": map[string]any{"type": "string", "enum": []string{"auto", "agy", "qwen", "claude"}}, "task": map[string]any{"type": "string"}, "cwd": map[string]any{"type": "string"}, "mode": map[string]any{"type": "string", "enum": []string{"auto", "inspect", "implement"}}, "risk_reviewed": map[string]any{"type": "boolean"}, "timeout_seconds": map[string]any{"type": "integer", "minimum": 1}, "idle_timeout_seconds": map[string]any{"type": "integer", "minimum": 1, "maximum": 3600}}, []string{"task", "cwd"})},
+		{"name": "spawn_agent", "description": "Delegate a bounded task to an external coding agent.", "inputSchema": object(map[string]any{"backend": map[string]any{"type": "string", "enum": []string{"auto", "agy", "qwen", "claude", "codex"}}, "task": map[string]any{"type": "string"}, "cwd": map[string]any{"type": "string"}, "mode": map[string]any{"type": "string", "enum": []string{"auto", "inspect", "implement"}}, "risk_reviewed": map[string]any{"type": "boolean"}, "timeout_seconds": map[string]any{"type": "integer", "minimum": 1}, "idle_timeout_seconds": map[string]any{"type": "integer", "minimum": 1, "maximum": 3600}}, []string{"task", "cwd"})},
 		{"name": "wait_agent", "description": "Wait on an existing agent. A timeout report includes resumable=true when a supervisor may inspect the partial work and resume it manually.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}, "wait_seconds": map[string]any{"type": "integer", "minimum": 0, "maximum": 50}}, []string{"agent_id"})},
 		{"name": "resume_agent", "description": "Resume a timed-out job after the supervisor inspects its partial report and workspace. Starts a new attempt with the same backend and scope; previous evidence remains available. An optional timeout_seconds overrides the previous attempt's timeout.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}, "timeout_seconds": map[string]any{"type": "integer", "minimum": 1}}, []string{"agent_id"})},
 		{"name": "list_agents", "description": "List running jobs and timed-out jobs that are available for supervisor inspection and manual resume.", "inputSchema": object(map[string]any{}, nil)},
@@ -112,7 +116,7 @@ func tools() map[string]any {
 		{"name": "laya_feedback", "description": "Record reviewed policy labels and outcome for a job without task text.", "inputSchema": object(map[string]any{"agent_id": map[string]any{"type": "string"}, "backend": map[string]any{"type": "string", "enum": []string{"agy", "qwen", "claude"}}, "mode": map[string]any{"type": "string", "enum": []string{"inspect", "implement"}}, "risk": map[string]any{"type": "string", "enum": []string{"low", "medium", "high"}}, "timeout_policy": map[string]any{"type": "string", "enum": []string{"short", "standard", "long"}}, "retry_policy": map[string]any{"type": "string", "enum": []string{"never", "inspect_once"}}, "outcome": map[string]any{"type": "string", "enum": []string{"completed", "failed", "interrupted"}}}, []string{"agent_id", "backend", "mode", "risk", "timeout_policy", "retry_policy", "outcome"})},
 		{"name": "auth_status", "description": "Inspect global provider authentication without exposing credentials.", "inputSchema": object(map[string]any{}, nil)},
 		{"name": "health_status", "description": "Run configured provider health checks without exposing credentials.", "inputSchema": object(
-			map[string]any{"provider": map[string]any{"type": "string", "enum": []string{"qwen", "agy", "claude", "all"}}},
+			map[string]any{"provider": map[string]any{"type": "string", "enum": []string{"qwen", "agy", "claude", "codex", "all"}}},
 			[]string{"provider"},
 		)},
 	}}
@@ -136,12 +140,12 @@ func call(params map[string]any) (any, error) {
 		}
 		if provider == "all" {
 			result := map[string]health.Result{}
-			for _, name := range []string{"qwen", "agy", "claude"} {
+			for _, name := range []string{"qwen", "agy", "claude", "codex"} {
 				result[name] = health.Check(context.Background(), settings, name, credentials.Default())
 			}
 			return result, nil
 		}
-		if provider != "qwen" && provider != "agy" && provider != "claude" {
+		if provider != "qwen" && provider != "agy" && provider != "claude" && provider != "codex" {
 			return nil, fmt.Errorf("unknown provider %q", provider)
 		}
 		return health.Check(context.Background(), settings, provider, credentials.Default()), nil

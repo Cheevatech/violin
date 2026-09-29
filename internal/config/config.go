@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,6 +17,9 @@ type Timeouts struct {
 }
 
 type Backend struct {
+	Model              string `toml:"model" json:"model,omitempty"`
+	Auth               string `toml:"auth" json:"auth,omitempty"`
+	APIKeyEnv          string `toml:"api_key_env" json:"api_key_env,omitempty"`
 	MaxConcurrency     int    `toml:"max_concurrency" json:"max_concurrency"`
 	Command            any    `toml:"command" json:"command,omitempty"`
 	Protocol           string `toml:"protocol" json:"protocol"`
@@ -76,6 +80,7 @@ func Defaults() Config {
 			"agy":    {MaxConcurrency: 10, Protocol: "agy"},
 			"qwen":   {MaxConcurrency: 1, Protocol: "qwen", Stdin: true, Transport: "auto"},
 			"claude": {MaxConcurrency: 2, Protocol: "claude"},
+			"codex":  {MaxConcurrency: 1, Protocol: "codex"},
 		},
 		Timeouts: Timeouts{MaxSeconds: 14400, Defaults: map[string]int{"inspect": 900, "implement": 3600}},
 		Laya:     Laya{Mode: "shadow", TimeoutSeconds: 10, Supervisor: Supervisor{Mode: "shadow", HeartbeatSeconds: 5, StaleSeconds: 15, ExtensionSeconds: 300, MaxExtensions: 2, MaxRetries: 1}},
@@ -115,6 +120,19 @@ func loadFiles(paths []string) (Config, error) {
 		}
 	}
 	applyBackendEnv(&c)
+	for name, backend := range c.Backend {
+		normalizeBackend(&backend)
+		if backend.EffectiveModel() == "" && backendHasModelPlaceholder(backend) {
+			return c, fmt.Errorf("backend.%s.model is required when its command uses {model}", name)
+		}
+		if backend.Auth != "" && backend.Auth != "api_key" && backend.Auth != "cli" {
+			return c, fmt.Errorf("backend.%s.auth must be api_key or cli", name)
+		}
+		if (backend.Transport == "api" && backend.Auth == "cli") || (backend.Transport == "cli" && backend.Auth == "api_key") {
+			return c, fmt.Errorf("backend.%s.auth must match its transport", name)
+		}
+		c.Backend[name] = backend
+	}
 	if value := os.Getenv("VIOLIN_BACKEND_ORDER"); value != "" {
 		c.Scheduler.Order = strings.Split(value, ",")
 	}
@@ -159,8 +177,93 @@ func loadFiles(paths []string) (Config, error) {
 	return c, nil
 }
 
+func backendHasModelPlaceholder(backend Backend) bool {
+	for _, arg := range backend.CLI.Command {
+		if strings.Contains(arg, "{model}") {
+			return true
+		}
+	}
+	switch args := backend.Command.(type) {
+	case []string:
+		for _, arg := range args {
+			if strings.Contains(arg, "{model}") {
+				return true
+			}
+		}
+	case []any:
+		for _, arg := range args {
+			if strings.Contains(fmt.Sprint(arg), "{model}") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// normalizeBackend migrates legacy API fields and hard-coded CLI --model/-m
+// argv values into the shared backend settings in memory.
+func normalizeBackend(backend *Backend) {
+	if strings.TrimSpace(backend.Model) == "" {
+		backend.Model = strings.TrimSpace(backend.API.Model)
+	}
+	if strings.TrimSpace(backend.APIKeyEnv) == "" {
+		backend.APIKeyEnv = strings.TrimSpace(backend.API.APIKeyEnv)
+	}
+	backend.API.Model = ""
+	backend.API.APIKeyEnv = ""
+	if backend.Model == "" {
+		backend.Model = modelFromArgs(backend.CLI.Command)
+	}
+	if backend.Model == "" {
+		if args, ok := backend.Command.([]any); ok {
+			backend.Model = modelFromAnyArgs(args)
+		} else if args, ok := backend.Command.([]string); ok {
+			backend.Model = modelFromArgs(args)
+		}
+	}
+	if backend.Model == "" {
+		return
+	}
+	for i, arg := range backend.CLI.Command {
+		if (arg == "--model" || arg == "-m") && i+1 < len(backend.CLI.Command) {
+			backend.CLI.Command[i+1] = "{model}"
+		}
+	}
+	switch args := backend.Command.(type) {
+	case []any:
+		for i, arg := range args {
+			if (arg == "--model" || arg == "-m") && i+1 < len(args) {
+				args[i+1] = "{model}"
+			}
+		}
+	case []string:
+		for i, arg := range args {
+			if (arg == "--model" || arg == "-m") && i+1 < len(args) {
+				args[i+1] = "{model}"
+			}
+		}
+	}
+}
+
+func modelFromArgs(args []string) string {
+	for i, arg := range args {
+		if (arg == "--model" || arg == "-m") && i+1 < len(args) && args[i+1] != "{model}" {
+			return strings.TrimSpace(args[i+1])
+		}
+	}
+	return ""
+}
+
+func modelFromAnyArgs(args []any) string {
+	values := make([]string, len(args))
+	for i, arg := range args {
+		values[i] = strings.TrimSpace(fmt.Sprint(arg))
+	}
+	return modelFromArgs(values)
+}
+
 func applyBackendEnv(c *Config) {
-	for _, name := range []string{"qwen", "agy", "claude"} {
+	for _, name := range []string{"qwen", "agy", "claude", "codex"} {
 		backend := c.Backend[name]
 		prefix := "VIOLIN_" + strings.ToUpper(name) + "_"
 		if value := os.Getenv(prefix + "TRANSPORT"); value != "" {
@@ -170,9 +273,14 @@ func applyBackendEnv(c *Config) {
 			backend.API.BaseURL = value
 		}
 		if value := os.Getenv(prefix + "MODEL"); value != "" {
-			backend.API.Model = value
+			backend.Model = value
+			backend.API.Model = value // legacy API field compatibility
+		}
+		if value := os.Getenv(prefix + "AUTH"); value != "" {
+			backend.Auth = value
 		}
 		if value := os.Getenv(prefix + "API_KEY_ENV"); value != "" {
+			backend.APIKeyEnv = value
 			backend.API.APIKeyEnv = value
 		}
 		if value := os.Getenv(prefix + "CLI_COMMAND"); value != "" {
@@ -184,6 +292,22 @@ func applyBackendEnv(c *Config) {
 		}
 		c.Backend[name] = backend
 	}
+}
+
+// EffectiveModel returns the common backend model setting, falling back to the
+// legacy API-specific field for existing configurations.
+func (b Backend) EffectiveModel() string {
+	if strings.TrimSpace(b.Model) != "" {
+		return strings.TrimSpace(b.Model)
+	}
+	return strings.TrimSpace(b.API.Model)
+}
+
+func (b Backend) EffectiveAPIKeyEnv() string {
+	if strings.TrimSpace(b.APIKeyEnv) != "" {
+		return strings.TrimSpace(b.APIKeyEnv)
+	}
+	return strings.TrimSpace(b.API.APIKeyEnv)
 }
 
 func IdleTimeoutEnabled(name string, backend Backend) bool {

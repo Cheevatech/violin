@@ -89,18 +89,16 @@ def command(backend, mode, cwd, result, timeout, prompt, task_file):
     if configured is not None:
         return configured
     if backend == "qwen":
-        return [os.environ.get("VIOLIN_QWEN_BIN", str(Path.home()/"bin/violin-codex-qwen")), "exec", "--ephemeral", "--skip-git-repo-check", "-C", str(cwd), "-s", "workspace-write" if mode == "implement" else "read-only", "--json", "-o", str(result), "-"]
+        return [os.environ.get("VIOLIN_QWEN_BIN", "qwen"), "--safe-mode", "--auth-type", "openai", "--model", os.environ.get("VIOLIN_QWEN_MODEL", "qwen3.8-27b"), "--approval-mode", "plan" if mode == "inspect" else "auto", "--max-wall-time", f"{timeout}s", "--output-format", "stream-json", "--append-system-prompt", "Before acting, read and follow applicable AGENTS.md and CLAUDE.md instructions. In inspect mode, do not modify files. In implement mode, change only the requested scope and report the files changed and checks run. Use only the current workspace."]
     if backend == "agy":
         return [os.environ.get("VIOLIN_AGY_BIN", str(Path.home()/".local/bin/agy")), "--add-dir", str(cwd), "--model", "gemini-3.8-flash-medium", "--mode", "accept-edits" if mode == "implement" else "plan", "--sandbox", "--output-format", "json", "--print-timeout", f"{timeout}s", "--print", prompt]
     return [os.environ.get("VIOLIN_CLAUDE_BIN", str(Path.home()/"bin/violin-claude")), "--print", "--model", "claude-sonnet-5", "--permission-mode", "acceptEdits" if mode == "implement" else "plan", "--add-dir", str(cwd), "--output-format", "stream-json", "--verbose", prompt]
 
 def health(run, deadline):
-    # The health command runs metadata and smoke checks sequentially. Give it
-    # their configured budgets plus a small process-startup/serialization margin.
+    # The health command makes a bounded, read-only inference request.
     try:
-        metadata_timeout = float(os.environ.get("VIOLIN_METADATA_TIMEOUT", "10"))
-        smoke_timeout = float(os.environ.get("VIOLIN_SMOKE_TIMEOUT", "60"))
-        health_timeout = max(1.0, metadata_timeout + smoke_timeout + 5.0)
+        smoke_timeout = float(os.environ.get("VIOLIN_SMOKE_TIMEOUT", "35"))
+        health_timeout = max(1.0, smoke_timeout + 5.0)
         health_timeout = min(health_timeout, max(0.001, deadline-time.monotonic()))
     except ValueError:
         health_timeout = max(0.001, deadline-time.monotonic())
@@ -108,11 +106,11 @@ def health(run, deadline):
         p = subprocess.run([str(HEALTH)], capture_output=True, text=True, timeout=health_timeout); value = json.loads(p.stdout)
     except subprocess.TimeoutExpired as exc:
         p = None
-        value = {"status":"metadata_unavailable", "error":type(exc).__name__,
+        value = {"status":"qwen_unhealthy", "error":type(exc).__name__,
                  "status_detail":"preflight_timeout", "preflight_timeout_seconds":health_timeout}
-    except (OSError, ValueError) as exc: p = None; value = {"status":"metadata_unavailable", "error":type(exc).__name__}
-    atomic_json(run/"health.json", value); atomic_json(run/"metadata.json", value.get("metadata", {"status":"unavailable", "error":value.get("error")}))
-    if p is None or p.returncode == 78: return value, "metadata_unavailable"
+    except (OSError, ValueError) as exc: p = None; value = {"status":"qwen_unhealthy", "error":type(exc).__name__}
+    atomic_json(run/"health.json", value); atomic_json(run/"metadata.json", value.get("metadata", {"status":value.get("metadata_status", "not_applicable")}))
+    if p is None: return value, "qwen_unhealthy"
     if p.returncode != 0: return value, "qwen_unhealthy"
     return value, None
 
@@ -175,6 +173,15 @@ def parse_provider_event(event, protocol, state, activity):
                 state["error"] = (state["error"] or event.get("result") or
                                    event.get("error") or "Claude returned an error")
             activity.event("completed" if not state["error"] else "failed")
+    if protocol == "qwen" and typ == "result":
+        state["terminal"] = True
+        state["terminal_status"] = event.get("subtype")
+        state["usage"] = event.get("usage")
+        if isinstance(event.get("result"), str):
+            state["final_result"] = event["result"]
+        if event.get("subtype") != "success" or event.get("is_error"):
+            state["error"] = state["error"] or event.get("result") or event.get("error") or "Qwen Code returned an error"
+        activity.event("completed" if not state["error"] else "failed")
     if typ in ("response.completed", "turn.completed") and protocol == "qwen":
         state["terminal"] = True
         response = event.get("response") if isinstance(event.get("response"), dict) else {}
@@ -206,7 +213,7 @@ def main():
                 report["status_detail"] = metadata["status_detail"]
             atomic_json(run/"report.json",report); print(json.dumps(report,ensure_ascii=False)); return 1
     baseline_code,baseline=git_state(cwd); policy="Inspect only; do not change files." if a.mode=="inspect" else "Change only the assigned scope. Inspect the resulting diff and run relevant validation."
-    prompt=f"""You are a delegated worker. Codex is the supervisor and makes final decisions.
+    prompt=f"""You are a delegated worker. Violin is the supervisor and makes final decisions.
 Assigned workspace (absolute path): {cwd}
 Resolve all task-relative paths against that directory. {policy}
 Follow applicable AGENTS.md and CLAUDE.md. Do not delegate further. Report concise findings, evidence paths, commands and exit statuses, changed files, and unresolved limitations. Never claim checks that were not run.
@@ -287,6 +294,8 @@ Task:
             result.write_text(payload["response"]); state["text"]=[payload["response"]]; state["usage"]=payload.get("usage")
         except (ValueError,TypeError,OSError) as exc: status="failed"; state["error"]=str(exc)
     if protocol == "claude" and state.get("final_result"):
+        result.write_text(state["final_result"])
+    if protocol == "qwen" and state.get("final_result"):
         result.write_text(state["final_result"])
     if protocol == "claude" and not custom:
         try:

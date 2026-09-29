@@ -1,6 +1,6 @@
 # Qwen Global Workflow
 
-## Go control plane and managed Laya model
+## Go control plane and Laya decision engine
 
 Install the public launcher without installing Go or Python:
 
@@ -41,14 +41,15 @@ worker; the existing Python worker entrypoints remain available as an explicit
 compatibility path for legacy configurations.
 
 Authentication is global to the current OS user, not to a Violin job or
-session. Claude uses `claude auth login`; Qwen uses `codex login`; AGY has no
+session. Claude uses `claude auth login`; Qwen Code reads its configured
+OpenAI-compatible model and credential from `~/.qwen/settings.json`. AGY has no
 CLI login command and must use `VIOLIN_AGY_API_KEY` or the OS keychain. MCP can
 read `auth_status` without exposing credentials. Login is explicit and is not
 started automatically by an MCP request.
 
 Qwen has generic `cli`, `api`, and `auto` transports. Public defaults do not
-select an endpoint, model, or local provider. The original self-hosted route is
-available only as an opt-in example profile under `examples/profiles/`.
+select an endpoint, model, or local provider. The Qwen Code CLI route is an
+opt-in profile under `examples/profiles/` and does not invoke Codex CLI.
 
 The repository now contains a Go control-plane binary built with `make go-build`:
 
@@ -63,11 +64,23 @@ The repository now contains a Go control-plane binary built with `make go-build`
 ```
 
 The Go binary owns MCP, job lifecycle, evidence descriptors, provider health,
-and model activation.
-`violin install` also installs the built-in Go Laya inference engine's verified
-English model under the shared worker state directory. Its manifest must declare `language: "en"`;
-multilingual checkpoints are intentionally outside this control-plane contract.
-Activation is atomic and checksum failures leave the current model untouched.
+and the Laya decision boundary. Violin's `internal/laya` package is an adapter
+and policy integration; it is not the upstream Laya AI project. Upstream Laya
+AI is the local typed-decision model at
+[`NandhaKishorM/laya`](https://github.com/NandhaKishorM/laya), distributed as
+the Python `laya` package. It returns structured choices, scores, and
+probabilities rather than generated prose.
+
+Violin keeps its existing MCP server and calls the local Laya package behind
+the Go decision boundary. Do not configure `laya-mcp-server` as a second MCP
+server for Violin. The current Qwen/llama.cpp path is not upstream Laya AI and
+must be replaced before claiming the upstream model is installed. See
+[ADR 0007](docs/adr/0007-upstream-laya-ai-integration.md) for the integration
+decision and rollout requirements.
+
+The legacy Go classifier remains a fallback until the upstream package and
+checkpoint are pinned, installed, and verified. Model activation is atomic and
+checksum failures leave the current model untouched.
 Set `[laya].runner` only for development adapters and choose `shadow`,
 `advisory`, or `active` in `[laya].mode`. The runtime receives the verified
 active model directory as `VIOLIN_LAYA_MODEL_DIR`; `VIOLIN_LAYA_RUNNER` and
@@ -104,8 +117,9 @@ available as a compatibility path during migration.
 ## External workers under Codex supervision
 
 `compat/python/bin/violin-worker` is the legacy Python compatibility worker; the
-Go worker is the public runtime. The compatibility worker runs Qwen through the existing Codex launcher, AGY with
-the exact model `gemini-3.8-flash-medium`. It accepts task text on stdin or via
+Go worker is the public runtime. Qwen Code runs as its own backend, while Codex
+CLI stays on Codex's native model/profile. AGY uses the exact model
+`gemini-3.8-flash-medium`. The worker accepts task text on stdin or via
 `--task-file`, so the supervisor can send a bounded task instead of copying the
 whole conversation.
 
@@ -116,10 +130,10 @@ printf '%s' 'Read README.md and summarize the commands with source paths.' |
 ./compat/python/bin/violin-worker qwen --mode implement -C /absolute/workspace --task-file /path/task.txt
 ```
 
-Inspection is the default. Qwen uses a read-only sandbox; AGY uses plan mode
-with its terminal sandbox (these are different enforcement mechanisms).
-Implementation uses Qwen workspace-write, AGY accept-edits with sandbox, or
-Claude Code `acceptEdits`. The MCP server and `violin-agent` CLI share a
+Inspection is the default. Qwen Code uses plan approval mode for inspection and
+classifier-based auto mode for implementation. AGY uses plan mode with its
+terminal sandbox (these are different enforcement mechanisms), and Claude Code
+uses `acceptEdits`. The MCP server and `violin-agent` CLI share a
 configurable global round-robin scheduler. Defaults are AGY (10), Qwen (1),
 then Claude Code (2), with a 10-job per-session limit and a 13-job
 machine-wide limit. Full backends are skipped instead of filling the first
@@ -193,31 +207,51 @@ treated as a generic command, even when it contains only one executable name;
 use the legacy `VIOLIN_<BACKEND>_BIN` environment variable when replacing only
 the built-in launcher path. Supported placeholders are
 `{workspace}`, `{task_file}`, `{result_file}`, `{prompt}`, `{mode}`,
-`{timeout}`, and `{idle_timeout}`. Set `protocol` to `text` or `json` for a
+`{timeout}`, `{idle_timeout}`, `{approval_mode}`, `{sandbox}`, and `{model}`. Set `protocol` to `text` or `json` for a
 generic CLI such as Hermes; `stdin = true` sends the generated task prompt on
-stdin. Public defaults do not select a Qwen endpoint or model. The original
-`qwen3.8-27b` through `violin_lan` route is an opt-in compatibility profile in
-`examples/profiles/violin-lan-qwen.toml`.
+stdin. Put the model and authentication choice at the backend level for every
+provider; API endpoints and wire format remain under `[backend.NAME.api]`.
+Use `auth = "api_key"` with `api_key_env` for key-backed API routes, or
+`auth = "cli"` for an already authenticated CLI. Keys stay in the environment
+or OS keychain. A configured CLI model requires `{model}` in its argv so Violin
+cannot silently ignore it. Reports include `requested_model`; `actual_model`
+remains `unknown` unless the provider confirms it.
+
+Public defaults do not select a Qwen endpoint or model. The opt-in
+`examples/profiles/violin-lan-qwen.toml` profile calls Qwen Code directly and
+uses the common backend model while keeping provider credentials in Qwen Code's
+existing configuration.
+Codex can be configured with the same `model` and `auth` fields as a CLI
+backend; it is opt-in and is not in the default round-robin order:
+
+```toml
+[backend.codex]
+model = "gpt-6-luna"
+auth = "cli"
+transport = "cli"
+
+[backend.codex.cli]
+command = ["codex", "exec", "--json", "--model", "{model}", "--sandbox", "{sandbox}", "-C", "{workspace}", "-"]
+status_command = ["codex", "login", "status"]
+login_command = ["codex", "login"]
+```
+
+Add `"codex"` to `scheduler.order` to include it in automatic selection.
 
 ```toml
 [backend.qwen]
-command = ["hermes", "run", "--workspace", "{workspace}", "--task-file", "{task_file}"]
-protocol = "text"
-stdin = false
-health_command = ["hermes", "--health"]
+model = "qwen3.8-27b"
+auth = "cli"
+command = ["qwen", "--safe-mode", "--auth-type", "openai", "--model", "{model}", "--approval-mode", "{approval_mode}", "--max-wall-time", "{timeout}", "--output-format", "stream-json"]
+protocol = "qwen"
+stdin = true
+idle_timeout_enabled = false
+health_command = ["violin-health"]
 ```
-Custom Qwen commands skip the built-in Qwen metadata/smoke preflight. If
-`health_command` is configured, MCP and CLI run it without a shell before an
-auto-selected Qwen job; otherwise the custom command is accepted without the
-built-in Qwen preflight.
-Qwen preflight is shared by `compat/python/bin/violin-health` and the legacy
-compatibility worker. It
-reports metadata as `healthy`, `degraded`, or `unavailable`, then runs a real
-runtime smoke that proves the final response contains the pinned model and
-provider. A custom model missing from the catalog is `degraded`, not synthetic
-`healthy`; it is usable when smoke passes. Otherwise the worker reports
-`metadata_unavailable` or `qwen_unhealthy`. Set `VIOLIN_CODEX_MODELS_CACHE` to
-inspect a specific cache file.
+The Qwen Code CLI reads provider credentials from `~/.qwen/settings.json`.
+Violin's Qwen health check makes a bounded inference request and accepts the
+backend only when the expected final response arrives; it does not depend on
+Codex's model cache or profile configuration.
 
 Each run contains an atomic `status.json` with only phase, last activity,
 elapsed time, PID, evidence directory, effective timeout policy, heartbeat
@@ -232,12 +266,12 @@ streams are not reliable; they rely on the hard task timeout instead of
 falsely treating normal reasoning time as idle. Custom commands still use idle
 timeout.
 
-The Go MCP server also exposes Laya tools in the same server: `laya_route`,
+The Go MCP server exposes Laya tools in the same server: `laya_route`,
 `laya_review_risk`, `laya_check_job`, `laya_wait_job`,
 `laya_explain_decision`, and `laya_feedback`. Route and risk review are
 read-only; feedback stores reviewed policy labels without task text. They reuse
-Violin's existing job descriptors, evidence, supervisor, and verified English
-model; there is no separate Laya MCP server.
+Violin's existing job descriptors, evidence, supervisor, and Laya decision
+adapter; there is no separate Laya MCP server.
 
 When a run stops, inspect `report.json`, `status.json`, `task.txt`,
 `output.json`, `stdout.log`, and `stderr.log` under the reported evidence path.
@@ -266,8 +300,7 @@ MCP route was tested through Codex's real tool protocol; native
 `collaboration.spawn_agent` remains unsupported for this external provider in
 Codex 0.153.2.
 
-Global launchers for running the self-hosted Qwen profile through the Codex
-harness.
+Qwen Code helper commands for the self-hosted Qwen backend.
 
 ## Commands
 
@@ -278,8 +311,9 @@ violin-qwen-review -C /path/to/repo "Review the current diff"
 violin-qwen-verify -C /path/to/repo "Run the relevant checks"
 ```
 
-Plan, review, and verify use a read-only sandbox. Implement uses
-`workspace-write`.
+Plan, review, and verify use Qwen Code's `plan` approval mode. Implement uses
+its classifier-based `auto` mode. Codex CLI remains available separately and
+uses its native Codex model.
 
 ## Verification gate
 

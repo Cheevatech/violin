@@ -1,58 +1,54 @@
 #!/usr/bin/env python3
-"""Canonical Qwen metadata and runtime preflight.
-
-Exit 0 means usable (metadata may be degraded), 78 means metadata unavailable,
-and 79 means the configured runtime smoke failed.
-"""
+"""Qwen Code CLI runtime preflight. Exit 0 only on the expected final response."""
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 
-METADATA = Path(__file__).with_name("violin-qwen-metadata")
+SMOKE_OK = "VIOLIN_QWEN_CODE_SMOKE_OK"
 
 
 def main():
-    binary = os.environ.get("VIOLIN_QWEN_BIN", str(Path.home() / "bin/violin-codex-qwen"))
+    binary = os.environ.get("VIOLIN_QWEN_BIN", "qwen")
+    model = os.environ.get("VIOLIN_QWEN_MODEL", "qwen3.8-27b")
+    timeout = float(os.environ.get("VIOLIN_SMOKE_TIMEOUT", "35"))
+    command = [binary, "--safe-mode", "--auth-type", "openai", "--model", model,
+               "--approval-mode", "plan", "--max-tool-calls", "0",
+               "--max-wall-time", f"{timeout}s", "--output-format", "stream-json",
+               "-p", f"Reply exactly {SMOKE_OK}. Do not use tools."]
+    evidence = {"model": model, "interface": "qwen-code-cli", "smoke_status": "failed"}
     try:
-        metadata_proc = subprocess.run([str(METADATA)], capture_output=True, text=True,
-                                       timeout=float(os.environ.get("VIOLIN_METADATA_TIMEOUT", "10")))
-        metadata = json.loads(metadata_proc.stdout)
-    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
-        metadata_proc = None
-        metadata = {"status": "unavailable", "error": f"metadata_check: {type(exc).__name__}"}
-    result = {"model": "qwen3.8-27b", "provider": "violin_lan", "metadata": metadata,
-              "metadata_status": metadata.get("status", "unavailable")}
-    if metadata_proc is None or metadata_proc.returncode != 0:
-        result.update(status="metadata_unavailable", smoke_status="not_run")
-        print(json.dumps(result, ensure_ascii=False))
-        return 78
-    try:
-        smoke = subprocess.run([binary, "smoke"], capture_output=True, text=True,
-                               timeout=float(os.environ.get("VIOLIN_SMOKE_TIMEOUT", "60")))
-        smoke_evidence = {"command": [binary, "smoke"], "exit_code": smoke.returncode,
-                          "stdout": smoke.stdout, "stderr": smoke.stderr}
+        smoke = subprocess.run(command, capture_output=True, text=True, timeout=timeout + 3)
     except subprocess.TimeoutExpired as exc:
-        smoke_evidence = {"command": [binary, "smoke"], "exit_code": None,
-                          "stdout": exc.stdout or "", "stderr": exc.stderr or "",
-                          "error": "smoke_timeout"}
-        smoke = None
-    except OSError as exc:
-        smoke_evidence = {"command": [binary, "smoke"], "exit_code": None,
-                          "error": f"smoke_launch_error: {type(exc).__name__}"}
-        smoke = None
-    result["smoke"] = smoke_evidence
-    result["smoke_status"] = "passed" if smoke and smoke.returncode == 0 else "failed"
-    text = (smoke_evidence.get("stdout") or "") + (smoke_evidence.get("stderr") or "")
-    markers = ("QWEN_SMOKE_OK", "qwen3.8-27b", "violin_lan")
-    if result["smoke_status"] != "passed" or any(marker not in text for marker in markers):
-        result.update(status="qwen_unhealthy", error="runtime smoke did not prove model/provider/final response")
-        print(json.dumps(result, ensure_ascii=False))
+        evidence.update(status="qwen_unhealthy", error="smoke_timeout",
+                        stdout_present=bool(exc.stdout), stderr_present=bool(exc.stderr))
+        print(json.dumps(evidence, ensure_ascii=False))
         return 79
-    result.update(status="ready", final_response_seen=True)
-    print(json.dumps(result, ensure_ascii=False))
-    return 0
+    except OSError as exc:
+        evidence.update(status="qwen_unhealthy", error=f"smoke_launch_error: {type(exc).__name__}")
+        print(json.dumps(evidence, ensure_ascii=False))
+        return 79
+    evidence.update(command=[binary, "--auth-type", "openai", "--model", model],
+                    exit_code=smoke.returncode)
+    if smoke.returncode == 55:
+        evidence.update(status="qwen_unhealthy", error="qwen_cli_budget_exceeded")
+    for line in smoke.stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "result":
+            evidence["result_status"] = event.get("subtype")
+            evidence["final_response_seen"] = isinstance(event.get("result"), str)
+            if event.get("subtype") == "success" and not event.get("is_error") and event.get("result") == SMOKE_OK:
+                evidence.update(status="ready", smoke_status="passed")
+                print(json.dumps(evidence, ensure_ascii=False))
+                return 0
+            evidence["error"] = "unexpected smoke response"
+    evidence.setdefault("status", "qwen_unhealthy")
+    evidence.setdefault("error", "Qwen Code did not return the expected successful final response")
+    print(json.dumps(evidence, ensure_ascii=False))
+    return 79
 
 
 if __name__ == "__main__":

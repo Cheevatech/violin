@@ -18,12 +18,13 @@ const (
 )
 
 type Question struct {
-	ID       string   `json:"id"`
-	Kind     Kind     `json:"kind"`
-	Prompt   string   `json:"prompt"`
-	Options  []string `json:"options,omitempty"`
-	Levels   []int    `json:"levels,omitempty"`
-	Fallback string   `json:"fallback,omitempty"`
+	ID                 string            `json:"id"`
+	Kind               Kind              `json:"kind"`
+	Prompt             string            `json:"prompt"`
+	Options            []string          `json:"options,omitempty"`
+	OptionDescriptions map[string]string `json:"option_descriptions,omitempty"`
+	Levels             []int             `json:"levels,omitempty"`
+	Fallback           string            `json:"fallback,omitempty"`
 }
 type Request struct {
 	Language     string     `json:"language,omitempty"`
@@ -36,8 +37,9 @@ type Answer struct {
 	Kind          Kind               `json:"kind"`
 	Value         any                `json:"value"`
 	Probabilities map[string]float64 `json:"probabilities,omitempty"`
-	Confidence    float64            `json:"confidence"`
-	Fallback      bool               `json:"fallback"`
+	// Upstream confidence is normalized entropy from the full precision distribution.
+	Confidence float64 `json:"confidence"`
+	Fallback   bool    `json:"fallback"`
 }
 
 type Risk string
@@ -93,7 +95,7 @@ func (d Decision) Validate() error {
 	}
 	seen := map[string]bool{}
 	for _, backend := range d.BackendCandidates {
-		if backend != "agy" && backend != "qwen" && backend != "claude" {
+		if backend != "agy" && backend != "qwen" && backend != "claude" && backend != "codex" {
 			return fmt.Errorf("unsupported Laya backend %q", backend)
 		}
 		if seen[backend] {
@@ -220,7 +222,7 @@ func (e FallbackEngine) Evaluate(request Request) (Result, error) {
 				return result, errors.New("choice question has no options")
 			}
 			selected := q.Fallback
-			if selected == "" {
+			if !containsString(q.Options, selected) {
 				selected = q.Options[0]
 			}
 			answer.Value = selected
@@ -237,13 +239,40 @@ func (e FallbackEngine) Evaluate(request Request) (Result, error) {
 		}
 		result.Answers = append(result.Answers, answer)
 	}
-	backend := "qwen"
-	if len(request.Questions) > 0 {
-		backend = request.Questions[0].Fallback
-		if backend == "" && len(request.Questions[0].Options) > 0 {
-			backend = request.Questions[0].Options[0]
+	choice := func(id, fallback string) string {
+		for _, answer := range result.Answers {
+			if answer.ID == id {
+				if selected, ok := answer.Value.(string); ok {
+					return selected
+				}
+			}
 		}
+		return fallback
 	}
-	result.Decision = &Decision{BackendCandidates: []string{backend}, TaskMode: "inspect", Risk: RiskLow, TimeoutHintSeconds: 900, IdleTimeoutEnabled: true, Retry: RetryHint{MaxAttempts: 1}, ExecutionTarget: ExecutionExternal, CostTier: TierMedium, LatencyTier: TierMedium, Confidence: 0, Fallback: true, ModelVersion: e.ModelVersion}
+	backend := choice("backend", "qwen")
+	if backend != "agy" && backend != "qwen" && backend != "claude" && backend != "codex" {
+		backend = "qwen"
+	}
+	taskMode := choice("task_mode", "inspect")
+	if taskMode != "inspect" && taskMode != "implement" {
+		taskMode = "inspect"
+	}
+	risk := Risk(choice("risk", string(RiskLow)))
+	if risk != RiskLow && risk != RiskMedium && risk != RiskHigh {
+		risk = RiskLow
+	}
+	timeout := map[string]int{"short": 300, "standard": 900, "long": 3600}[choice("timeout_policy", "standard")]
+	if timeout == 0 {
+		timeout = 900
+	}
+	retry := RetryHint{MaxAttempts: 1}
+	if choice("retry_policy", "no_retry") == "retry_once" && taskMode == "inspect" {
+		retry.MaxAttempts = 2
+	}
+	decision := &Decision{BackendCandidates: []string{backend}, TaskMode: taskMode, Risk: risk, TimeoutHintSeconds: timeout, IdleTimeoutEnabled: true, Retry: retry, ExecutionTarget: ExecutionExternal, CostTier: TierMedium, LatencyTier: TierMedium, Confidence: 0, Fallback: true, ModelVersion: e.ModelVersion}
+	if err := decision.Validate(); err != nil {
+		return result, err
+	}
+	result.Decision = decision
 	return result, nil
 }

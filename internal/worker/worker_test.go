@@ -39,6 +39,30 @@ func TestParseProviderOutputUnderstandsProviderEventStreams(t *testing.T) {
 	}
 }
 
+func TestParseQwenCodeJSONOutputUsesFinalResult(t *testing.T) {
+	input := `[{"type":"system","subtype":"session_start"},{"type":"assistant","message":{"content":[{"type":"text","text":"intermediate"}]}},{"type":"result","subtype":"success","is_error":false,"result":"Qwen Code final"}]`
+	got, err := parseProviderOutput([]byte(input), "qwen")
+	if err != nil || got != "Qwen Code final" {
+		t.Fatalf("got=%q err=%v", got, err)
+	}
+	input = `[{"type":"result","subtype":"error","is_error":true,"result":"Qwen Code failed"}]`
+	if _, err := parseProviderOutput([]byte(input), "qwen"); err == nil {
+		t.Fatal("expected failed Qwen Code result")
+	}
+}
+
+func TestRunCLIMapsQwenTaskModeToQwenCodeApprovalMode(t *testing.T) {
+	for _, test := range []struct{ mode, want string }{{"inspect", "plan"}, {"implement", "auto"}} {
+		t.Run(test.mode, func(t *testing.T) {
+			options := Options{Backend: "qwen", Mode: test.mode, Timeout: 5}
+			got, err := runCLI(context.Background(), []string{"/bin/sh", "-c", "printf '%s' \"$1\"", "sh", "{approval_mode}"}, "", options)
+			if err != nil || got != test.want {
+				t.Fatalf("got=%q err=%v, want %q", got, err, test.want)
+			}
+		})
+	}
+}
+
 func TestParseWorkerArgsIncludesIdleTimeout(t *testing.T) {
 	options, err := Parse([]string{"qwen", "--task-file", "/tmp/task", "--idle-timeout", "42"})
 	if err != nil {
@@ -76,13 +100,25 @@ func TestCommandPartsAcceptsLegacyConfiguredCommand(t *testing.T) {
 
 func TestGitFilesPreservesFirstPathCharacterInPorcelainOutput(t *testing.T) {
 	workspace := t.TempDir()
-	if err := os.WriteFile(filepath.Join(workspace, "tracked.txt"), []byte("before"), 0600); err != nil { t.Fatal(err) }
-	if err := exec.Command("git", "-C", workspace, "init", "-q").Run(); err != nil { t.Fatal(err) }
-	if err := exec.Command("git", "-C", workspace, "add", "tracked.txt").Run(); err != nil { t.Fatal(err) }
-	if err := exec.Command("git", "-C", workspace, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "base").Run(); err != nil { t.Fatal(err) }
-	if err := os.WriteFile(filepath.Join(workspace, "tracked.txt"), []byte("after"), 0600); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(filepath.Join(workspace, "tracked.txt"), []byte("before"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command("git", "-C", workspace, "init", "-q").Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command("git", "-C", workspace, "add", "tracked.txt").Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command("git", "-C", workspace, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "base").Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "tracked.txt"), []byte("after"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	files := gitFiles(workspace)
-	if len(files) != 1 || files[0] != "tracked.txt" { t.Fatalf("git files=%q", files) }
+	if len(files) != 1 || files[0] != "tracked.txt" {
+		t.Fatalf("git files=%q", files)
+	}
 }
 
 func TestRunAPITransportWritesResponsesReport(t *testing.T) {
@@ -303,5 +339,25 @@ func TestRunCLISupportsTaskArgumentPlaceholder(t *testing.T) {
 	}
 	if got != "task with spaces" {
 		t.Fatalf("got=%q", got)
+	}
+}
+
+func TestRunCLISupportsConfiguredModelPlaceholder(t *testing.T) {
+	options := Options{Backend: "claude", Workspace: t.TempDir(), Timeout: 5, IdleTimeoutEnabled: false, Model: "claude-sonnet-test"}
+	got, err := runCLI(context.Background(), []string{"/bin/sh", "-c", "printf '%s' \"$1\"", "shell", "{model}"}, "task", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != options.Model {
+		t.Fatalf("got=%q want=%q", got, options.Model)
+	}
+}
+
+func TestCommandHasPlaceholder(t *testing.T) {
+	if !commandHasPlaceholder([]string{"claude", "--model", "{model}"}, "model") {
+		t.Fatal("configured model placeholder not detected")
+	}
+	if commandHasPlaceholder([]string{"claude", "--model", "default"}, "model") {
+		t.Fatal("hard-coded model must not count as configured placeholder")
 	}
 }

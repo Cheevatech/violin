@@ -31,7 +31,8 @@ const (
 type UpstreamStatus struct {
 	Installed          bool            `json:"installed"`
 	FallbackInUse      bool            `json:"fallback_in_use"`
-	SDKVersion         string          `json:"runtime_version"`
+	LayaVersion        string          `json:"laya_version"`
+	RuntimeVersion     string          `json:"runtime_version"`
 	CheckpointRevision string          `json:"checkpoint_revision"`
 	Device             string          `json:"device,omitempty"`
 	Runtime            string          `json:"runtime,omitempty"`
@@ -180,6 +181,9 @@ func decisionFromAnswers(questions []Question, answers []Answer, modelVersion st
 		if err := validateAnswerProbabilities(id, question.Options, answer.Probabilities, value); err != nil {
 			return "", nil, err
 		}
+		if math.IsNaN(answer.Confidence) || math.IsInf(answer.Confidence, 0) || answer.Confidence < 0 || answer.Confidence > 1 {
+			return "", nil, fmt.Errorf("upstream Laya returned invalid %q confidence", id)
+		}
 		return value, answer.Probabilities, nil
 	}
 	backend, backendP, err := choice("backend")
@@ -207,7 +211,7 @@ func decisionFromAnswers(questions []Question, answers []Answer, modelVersion st
 	if len(ordered) == 0 || ordered[0].label != backend {
 		return nil, errors.New("upstream Laya backend answer does not match its probability distribution")
 	}
-	confidence := probabilityConfidence(backendP)
+	confidence := byID["backend"].Confidence
 	margin := ordered[0].probability
 	if len(ordered) > 1 {
 		margin -= ordered[1].probability
@@ -216,7 +220,7 @@ func decisionFromAnswers(questions []Question, answers []Answer, modelVersion st
 	for _, id := range []string{"backend", "task_mode", "risk", "timeout_policy", "retry_policy"} {
 		answer := byID[id]
 		orderedHead := sortedProbabilities(answer.Probabilities)
-		headConfidence[id] = probabilityConfidence(answer.Probabilities)
+		headConfidence[id] = answer.Confidence
 		headMargin[id] = orderedHead[0].probability
 		if len(orderedHead) > 1 {
 			headMargin[id] -= orderedHead[1].probability
@@ -249,7 +253,7 @@ func decisionFromAnswers(questions []Question, answers []Answer, modelVersion st
 
 // probabilityConfidence matches upstream laya.rl_common.confidence_from_probs:
 // 1 minus normalized entropy. It is derived from the answer distribution and
-// never trusts a model- or caller-supplied confidence field.
+// is computed by the inference adapter before displayed probabilities round.
 func probabilityConfidence(probabilities map[string]float64) float64 {
 	if len(probabilities) < 2 {
 		return 1
@@ -346,34 +350,56 @@ func serializeUpstreamState(state any) (string, error) {
 		sort.Strings(fields[priorityCount:])
 		for _, key := range fields {
 			if !first {
-				out.WriteByte(',')
+				out.WriteString(", ")
 			}
 			first = false
-			keyJSON, _ := marshalCompact(key)
-			valueJSON, err := marshalCompact(value[key])
+			keyJSON, _ := marshalUpstreamJSON(key)
+			valueJSON, err := marshalUpstreamJSON(value[key])
 			if err != nil {
 				return "", err
 			}
 			out.Write(keyJSON)
-			out.WriteByte(':')
+			out.WriteString(": ")
 			out.Write(valueJSON)
 		}
 		out.WriteString("}")
 		return out.String(), nil
 	default:
-		data, err := marshalCompact(state)
+		data, err := marshalUpstreamJSON(state)
 		return string(data), err
 	}
 }
 
-func marshalCompact(value any) ([]byte, error) {
+func marshalUpstreamJSON(value any) ([]byte, error) {
 	var buf bytes.Buffer
 	encoder := json.NewEncoder(&buf)
 	encoder.SetEscapeHTML(false)
 	if err := encoder.Encode(value); err != nil {
 		return nil, err
 	}
-	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+	compact := bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
+	var spaced bytes.Buffer
+	inString, escaped := false, false
+	for _, b := range compact {
+		if inString {
+			spaced.WriteByte(b)
+			if escaped {
+				escaped = false
+			} else if b == '\\' {
+				escaped = true
+			} else if b == '"' {
+				inString = false
+			}
+			continue
+		}
+		spaced.WriteByte(b)
+		if b == '"' {
+			inString = true
+		} else if b == ',' || b == ':' {
+			spaced.WriteByte(' ')
+		}
+	}
+	return spaced.Bytes(), nil
 }
 
 func SelectCheckpoint(state, language string) string {
@@ -675,7 +701,7 @@ func supportedPlatformFor(goos, goarch string) (string, bool) {
 }
 
 func UpstreamRuntimeStatus(root string) UpstreamStatus {
-	s := UpstreamStatus{SDKVersion: "onnxruntime-go/" + ORTVersion, CheckpointRevision: CheckpointRevision, Device: "cpu (default)", FallbackInUse: true, Checkpoints: map[string]bool{"typed-decisions": false, "multilingual": false}}
+	s := UpstreamStatus{LayaVersion: UpstreamVersion, RuntimeVersion: "onnxruntime-go/" + ORTVersion, CheckpointRevision: CheckpointRevision, Device: "cpu (default)", FallbackInUse: true, Checkpoints: map[string]bool{"typed-decisions": false, "multilingual": false}}
 	platform, ok := supportedPlatform()
 	if !ok {
 		s.Error = fmt.Sprintf("unsupported platform %s/%s", runtime.GOOS, runtime.GOARCH)

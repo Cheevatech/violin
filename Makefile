@@ -1,7 +1,7 @@
 .PHONY: test go-test go-build npm-test vet verify eval release-check smoke tool-smoke
 
 test:
-	sh -n bin/qwen-mode bin/qwen-verify-gate bin/violin-codex-qwen eval/run-smoke-tests eval/run-tool-smoke-tests
+	sh -n bin/qwen-mode bin/qwen-verify-gate eval/run-smoke-tests eval/run-tool-smoke-tests
 	python3 -m unittest discover -s tests
 	go test ./...
 
@@ -15,7 +15,7 @@ go-build:
 	go build -o bin/violin ./cmd/violin
 
 vet:
-	python3 -m py_compile compat/python/bin/violin_scheduler.py compat/python/bin/violin-agent compat/python/bin/violin-worker compat/python/bin/violin-health compat/python/bin/violin-qwen-metadata compat/python/bin/violin-agent-server compat/python/bin/install-violin-agents
+	python3 -m py_compile compat/python/bin/violin_scheduler.py compat/python/bin/violin-agent compat/python/bin/violin-worker compat/python/bin/violin-health compat/python/bin/violin-agent-server compat/python/bin/install-violin-agents
 	gofmt -l cmd internal
 	go vet ./...
 

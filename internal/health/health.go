@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -27,7 +28,7 @@ type Result struct {
 func Check(ctx context.Context, settings config.Config, provider string, store credentials.Store) Result {
 	backend := settings.Backend[provider]
 	if command := commandParts(backend.HealthCommand); len(command) > 0 {
-		return runCommand(ctx, provider, command)
+		return runCommand(ctx, provider, command, store)
 	}
 	if backend.Transport == "api" {
 		configured, err := providers.FromConfigProvider(ctx, settings, store, provider)
@@ -38,7 +39,7 @@ func Check(ctx context.Context, settings config.Config, provider string, store c
 		return Result{Provider: value.Provider, Healthy: value.Healthy, Status: value.Status, Evidence: value.Evidence}
 	}
 	if command := backend.CLI.StatusCommand; len(command) > 0 {
-		return runCommand(ctx, provider, command)
+		return runCommand(ctx, provider, command, store)
 	}
 	return Result{Provider: provider, Status: "unconfigured", Evidence: "configure backend health_command, API transport, or CLI status_command"}
 }
@@ -60,23 +61,57 @@ func commandParts(value any) []string {
 	}
 }
 
-func runCommand(parent context.Context, provider string, command []string) Result {
+func runCommand(parent context.Context, provider string, command []string, store credentials.Store) Result {
 	if len(command) == 0 {
 		return Result{Provider: provider, Status: "unconfigured"}
 	}
 	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, command[0], command[1:]...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+	if provider == "qwen" {
+		if key, lookupErr := store.Lookup(ctx, "LLMUX_API_KEY", "violin-llmux-api-key"); lookupErr == nil {
+			cmd.Env = replaceEnv(os.Environ(), "LLMUX_API_KEY", key)
+		}
+	}
+	output, err := cmd.CombinedOutput()
 	if err != nil {
 		status := "unavailable"
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			status = "timeout"
 		}
-		return Result{Provider: provider, Status: status, Evidence: map[string]any{"command": command[0], "error": err.Error()}}
+		evidence := map[string]any{"command": command[0], "error": err.Error()}
+		var reported map[string]any
+		if json.Unmarshal(output, &reported) == nil {
+			if value, ok := reported["status"].(string); ok && value != "" && value != "ready" {
+				status = value
+			}
+			for _, key := range []string{"interface", "model", "smoke_status", "error", "exit_code", "stdout_present", "stderr_present"} {
+				if value, ok := reported[key]; ok {
+					evidence[key] = value
+				}
+			}
+		}
+		return Result{Provider: provider, Status: status, Evidence: evidence}
 	}
 	var evidence any
 	if json.Unmarshal(output, &evidence) != nil {
 		evidence = strings.TrimSpace(string(output))
 	}
+	if reported, ok := evidence.(map[string]any); ok {
+		if status, ok := reported["status"].(string); ok && status != "ready" && status != "healthy" {
+			return Result{Provider: provider, Status: status, Evidence: reported}
+		}
+	}
 	return Result{Provider: provider, Healthy: true, Status: "healthy", Evidence: evidence}
+}
+
+func replaceEnv(env []string, name, value string) []string {
+	prefix := name + "="
+	result := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, prefix) {
+			result = append(result, entry)
+		}
+	}
+	return append(result, prefix+value)
 }

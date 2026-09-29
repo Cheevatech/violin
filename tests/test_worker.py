@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 RUNNER = Path(__file__).resolve().parents[1] / "compat/python/bin/violin-worker"
+HEALTH = Path(__file__).resolve().parents[1] / "compat/python/bin/violin-health"
 
 
 class WorkerTests(unittest.TestCase):
@@ -18,19 +19,16 @@ class WorkerTests(unittest.TestCase):
             fake = root / "fake"
             fake.write_text("""#!/usr/bin/env python3
 import sys
-if len(sys.argv) > 1 and sys.argv[1] == 'smoke':
-    print('QWEN_SMOKE_OK model=qwen3.8-27b provider=violin_lan')
+import json
+if '--max-tool-calls' in sys.argv:
+    print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':'VIOLIN_QWEN_CODE_SMOKE_OK'}))
     raise SystemExit(0)
 """ + script)
             fake.chmod(0o700)
             env = dict(os.environ, VIOLIN_WORKER_RUNS=str(root / "runs"))
             env["VIOLIN_" + backend.upper() + "_BIN"] = str(fake)
             if backend == "qwen":
-                (root / "models.json").write_text(json.dumps({"fetched_at": "2099-01-01T00:00:00Z", "models": [{
-                    "slug": "qwen3.8-27b", "context_window": 200000,
-                    "supported_reasoning_levels": [{"effort": "medium"}],
-                    "supported_in_api": True, "provider": "violin_lan", "wire_api": "responses"}]}))
-                env["VIOLIN_CODEX_MODELS_CACHE"] = str(root / "models.json")
+                env["VIOLIN_QWEN_MODEL"] = "qwen3.8-27b"
             result = subprocess.run([str(RUNNER), backend, "-C", directory, *options],
                                     input="Inspect this task", text=True, capture_output=True, env=env)
             report = json.loads(result.stdout)
@@ -70,12 +68,12 @@ if len(sys.argv) > 1 and sys.argv[1] == 'smoke':
 
     def test_qwen_result_and_usage(self):
         code, report = self.run_worker("qwen", """import sys,json,pathlib
-assert sys.argv[1] == 'exec'
-assert sys.argv[sys.argv.index('-s')+1] == 'read-only'
-assert 'Codex is the supervisor' in sys.stdin.read()
-pathlib.Path(sys.argv[sys.argv.index('-o')+1]).write_text('evidence verified')
-print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'done'}}))
-print(json.dumps({'type':'turn.completed','usage':{'input_tokens':42}}))
+assert '--safe-mode' in sys.argv
+assert sys.argv[sys.argv.index('--auth-type')+1] == 'openai'
+assert sys.argv[sys.argv.index('--model')+1] == 'qwen3.8-27b'
+assert sys.argv[sys.argv.index('--approval-mode')+1] == 'plan'
+assert 'Violin is the supervisor' in sys.stdin.read()
+print(json.dumps({'type':'result','subtype':'success','result':'evidence verified','usage':{'input_tokens':42}}))
 """)
         self.assertEqual(code, 0)
         self.assertEqual(report["usage"]["input_tokens"], 42)
@@ -200,16 +198,41 @@ print(json.dumps({'type':'turn.completed'}))
         self.assertEqual(report["status_detail"], "metadata_degraded")
         self.assertNotIn("failure_reason", report)
 
-    def test_qwen_health_timeout_uses_child_budgets_and_reports_detail(self):
+    def test_qwen_health_timeout_uses_child_budget_and_reports_detail(self):
         worker = runpy.run_path(str(RUNNER))
         with tempfile.TemporaryDirectory() as directory, \
-                mock.patch.dict(os.environ, {"VIOLIN_METADATA_TIMEOUT": "3", "VIOLIN_SMOKE_TIMEOUT": "12"}), \
+                mock.patch.dict(os.environ, {"VIOLIN_SMOKE_TIMEOUT": "12"}), \
                 mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("health", 20)) as run:
             value, failure = worker["health"](Path(directory), time.monotonic() + 30)
-        self.assertEqual(run.call_args.kwargs["timeout"], 20)
-        self.assertEqual(failure, "metadata_unavailable")
+        self.assertEqual(run.call_args.kwargs["timeout"], 17)
+        self.assertEqual(failure, "qwen_unhealthy")
         self.assertEqual(value["status_detail"], "preflight_timeout")
-        self.assertEqual(value["preflight_timeout_seconds"], 20)
+        self.assertEqual(value["preflight_timeout_seconds"], 17)
+
+    def test_qwen_health_command_budget_fits_go_health_deadline_and_hides_output(self):
+        health = runpy.run_path(str(HEALTH))
+        timeout = subprocess.TimeoutExpired("health", 35, output="credential", stderr="private detail")
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch("subprocess.run", side_effect=timeout) as run, \
+                mock.patch("builtins.print") as write:
+            code = health["main"]()
+        self.assertEqual(code, 79)
+        self.assertEqual(run.call_args.kwargs["timeout"], 38)
+        report = json.loads(write.call_args.args[0])
+        self.assertEqual(report["error"], "smoke_timeout")
+        self.assertNotIn("credential", json.dumps(report))
+        self.assertNotIn("private detail", json.dumps(report))
+
+    def test_qwen_health_classifies_cli_budget_exit(self):
+        health = runpy.run_path(str(HEALTH))
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch("subprocess.run", return_value=subprocess.CompletedProcess("qwen", 55, "", "private output")), \
+                mock.patch("builtins.print") as write:
+            code = health["main"]()
+        self.assertEqual(code, 79)
+        report = json.loads(write.call_args.args[0])
+        self.assertEqual(report["error"], "qwen_cli_budget_exceeded")
+        self.assertNotIn("private output", json.dumps(report))
 
     def test_implement_without_diff_is_no_changes(self):
         code, report = self.run_worker("qwen", """import json
@@ -232,20 +255,14 @@ print(json.dumps({'type':'turn.completed'}))
             fake.write_text("""#!/usr/bin/env python3
 import json,pathlib
 import sys
-if len(sys.argv) > 1 and sys.argv[1] == 'smoke':
- print('QWEN_SMOKE_OK model=qwen3.8-27b provider=violin_lan')
+if '--max-tool-calls' in sys.argv:
+ print(json.dumps({'type':'result','subtype':'success','result':'VIOLIN_QWEN_CODE_SMOKE_OK'}))
  raise SystemExit(0)
 pathlib.Path('tracked.txt').write_text('after')
-print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'implemented'}}))
-print(json.dumps({'type':'turn.completed'}))
+print(json.dumps({'type':'result','subtype':'success','result':'implemented'}))
 """)
             fake.chmod(0o700)
-            cache = root / "models.json"
-            cache.write_text(json.dumps({"fetched_at": "2099-01-01T00:00:00Z", "models": [{
-                "slug": "qwen3.8-27b", "context_window": 200000,
-                "supported_reasoning_levels": [{"effort": "medium"}],
-                "supported_in_api": True, "provider": "violin_lan", "wire_api": "responses"}]}))
-            env = dict(os.environ, VIOLIN_QWEN_BIN=str(fake), VIOLIN_CODEX_MODELS_CACHE=str(cache),
+            env = dict(os.environ, VIOLIN_QWEN_BIN=str(fake), VIOLIN_QWEN_MODEL="qwen3.8-27b",
                        VIOLIN_WORKER_RUNS=str(root / "runs"))
             result = subprocess.run([str(RUNNER), "qwen", "--mode", "implement", "-C", directory],
                                     input="Implement", text=True, capture_output=True, env=env)
@@ -288,104 +305,25 @@ print(json.dumps({'type':'turn.completed'}))
             self.assertEqual(report["status"], "idle_timeout")
             self.assertEqual(report["phase"], "timeout")
 
-    def test_metadata_cache_entry_passes_preflight(self):
-        checker = Path(__file__).resolve().parents[1] / "compat/python/bin/violin-qwen-metadata"
-        with tempfile.TemporaryDirectory() as directory:
-            cache = Path(directory) / "models.json"
-            cache.write_text(json.dumps({"fetched_at": "2099-01-01T00:00:00Z", "models": [{
-                "slug": "qwen3.8-27b", "context_window": 200000,
-                "supported_reasoning_levels": [{"effort": "medium"}],
-                "supported_in_api": True, "provider": "violin_lan", "wire_api": "responses"}]}))
-            result = subprocess.run([str(checker), str(cache)], capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0)
-
-    def test_qwen_launcher_finds_metadata_checker_from_bin_and_installed_symlink(self):
-        repo = Path(__file__).resolve().parents[1]
-        launcher = repo / "bin/violin-codex-qwen"
+    def test_worker_stops_before_qwen_backend_when_cli_smoke_fails(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            cache = root / "models.json"
-            cache.write_text(json.dumps({"fetched_at": "2099-01-01T00:00:00Z", "models": [{
-                "slug": "qwen3.8-27b", "context_window": 200000,
-                "supported_reasoning_levels": [{"effort": "medium"}],
-                "supported_in_api": True, "provider": "violin_lan", "wire_api": "responses"}]}))
-            fake_codex = root / "codex"
-            fake_codex.write_text("#!/bin/sh\nprintf '%s\\n' QWEN_LAUNCHER_OK\n")
-            fake_codex.chmod(0o700)
-            checker_marker = root / "metadata-checker-ran"
-            fake_checker = root / "fake-metadata-checker"
-            fake_checker.write_text("#!/bin/sh\ntouch '%s'\nprintf '{}\\n'\n" % checker_marker)
-            fake_checker.chmod(0o700)
-            source_bin = root / "source-bin"
-            source_bin.mkdir()
-            source_launcher = source_bin / "violin-codex-qwen"
-            source_launcher.write_bytes(launcher.read_bytes())
-            source_launcher.chmod(launcher.stat().st_mode & 0o777)
-            (source_bin / "violin-qwen-metadata").symlink_to(fake_checker)
-            installed_bin = root / "installed-bin"
-            installed_bin.mkdir()
-            installed_launcher = installed_bin / "violin-codex-qwen"
-            installed_launcher.symlink_to(source_launcher)
-            (installed_bin / "violin-qwen-metadata").symlink_to(fake_checker)
-            env = dict(os.environ, VIOLIN_CODEX_BIN=str(fake_codex),
-                       VIOLIN_CODEX_MODELS_CACHE=str(cache), LLMUX_API_KEY="offline-test")
-            direct = subprocess.run([str(launcher), "smoke"], capture_output=True,
-                                    text=True, env=env)
-            self.assertEqual(direct.returncode, 0, direct.stdout + direct.stderr)
-            self.assertIn("QWEN_LAUNCHER_OK", direct.stdout)
-            self.assertFalse(checker_marker.exists())
-
-            installed = subprocess.run([str(installed_launcher), "smoke"], capture_output=True,
-                                       text=True, env=env)
-            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
-            self.assertIn("QWEN_LAUNCHER_OK", installed.stdout)
-            self.assertTrue(checker_marker.exists(), "installed launcher did not run its adjacent metadata checker")
-
-    def test_incomplete_cache_entry_uses_effective_metadata(self):
-        checker = Path(__file__).resolve().parents[1] / "compat/python/bin/violin-qwen-metadata"
-        with tempfile.TemporaryDirectory() as directory:
-            cache = Path(directory) / "models.json"
-            cache.write_text(json.dumps({"fetched_at": "2099-01-01T00:00:00Z", "models": [{
-                "slug": "qwen3.8-27b", "context_window": 200000,
-                "supported_reasoning_levels": [{"effort": "medium"}],
-                "supported_in_api": True}]}))
-            effective = {"slug": "qwen3.8-27b", "shell_type": "responses",
-                         "context_window": 200000,
-                         "supported_reasoning_levels": [{"effort": "medium"}],
-                         "supported_in_api": True}
-            fake_codex = Path(directory) / "codex"
-            fake_codex.write_text("#!/usr/bin/env python3\nimport json\nprint(json.dumps(%r))\n" % {"models": [effective]})
-            fake_codex.chmod(0o700)
-            result = subprocess.run([str(checker), str(cache)], capture_output=True, text=True,
-                                    env=dict(os.environ, VIOLIN_CODEX_BIN=str(fake_codex)))
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertIn("codex_debug_models", result.stdout)
-            self.assertIn('"status": "degraded"', result.stdout)
-
-    def test_missing_qwen_metadata_does_not_launch_backend(self):
-        checker = Path(__file__).resolve().parents[1] / "compat/python/bin/violin-qwen-metadata"
-        with tempfile.TemporaryDirectory() as directory:
-            cache = Path(directory) / "models.json"
-            cache.write_text(json.dumps({"fetched_at": "2099-01-01T00:00:00Z", "models": []}))
-            result = subprocess.run([str(checker), str(cache)], capture_output=True, text=True,
-                                    env=dict(os.environ, VIOLIN_CODEX_BIN=str(Path(directory) / "missing-codex")))
-            self.assertEqual(result.returncode, 78)
-            self.assertIn("model entry is missing", result.stdout)
-
-    def test_worker_stops_before_qwen_backend_when_metadata_is_missing(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            fake = root / "violin-codex-qwen"
+            fake = root / "qwen"
             marker = root / "launched"
-            fake.write_text("#!/bin/sh\ntouch '%s'\n" % marker)
+            fake.write_text("""#!/usr/bin/env python3
+import json,pathlib,sys
+if '--max-tool-calls' in sys.argv:
+ print(json.dumps({'type':'result','subtype':'success','result':'wrong marker'}))
+ raise SystemExit(0)
+pathlib.Path(%r).touch()
+""" % str(marker))
             fake.chmod(0o700)
-            env = dict(os.environ, VIOLIN_QWEN_BIN=str(fake), VIOLIN_CODEX_BIN=str(root / "missing-codex"),
-                       VIOLIN_CODEX_MODELS_CACHE=str(root / "missing.json"),
+            env = dict(os.environ, VIOLIN_QWEN_BIN=str(fake),
                        VIOLIN_WORKER_RUNS=str(root / "runs"))
             result = subprocess.run([str(RUNNER), "qwen", "-C", directory],
                                     input="task", text=True, capture_output=True, env=env)
             report = json.loads(result.stdout)
-            self.assertEqual(report["status"], "metadata_unavailable")
+            self.assertEqual(report["status"], "qwen_unhealthy")
             self.assertFalse(marker.exists())
 
 if __name__ == "__main__":
